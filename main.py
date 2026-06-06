@@ -30,12 +30,17 @@ MAX_SAMPLES_PER_SPEAKER = None
 N_EPISODES = 500
 TRAIN_AUGMENT = True
 EVAL_SEED = 67
-PROTO_SCALE = 30.0
-PROTO_MARGIN = 0.2
 VAD_ENABLED = True
 VAD_TOP_DB = 30.0
 VAD_FRAME_LENGTH = 2048
 VAD_HOP_LENGTH = 512
+TRAINING_LOSS_MODE = "aam_softmax"
+PROTO_SCALE = 30.0
+PROTO_MARGIN = 0.2
+AAM_SCALE = 30.0
+AAM_MARGIN = 0.2
+HYBRID_PROTO_WEIGHT = 1.0
+HYBRID_AAM_WEIGHT = 1.0
 
 
 def main() -> None:
@@ -85,8 +90,13 @@ def main() -> None:
         vad_frame_length=VAD_FRAME_LENGTH,
         vad_hop_length=VAD_HOP_LENGTH,
         train_augment=TRAIN_AUGMENT,
+        training_loss_mode=TRAINING_LOSS_MODE,
         proto_scale=PROTO_SCALE,
         proto_margin=PROTO_MARGIN,
+        aam_scale=AAM_SCALE,
+        aam_margin=AAM_MARGIN,
+        hybrid_proto_weight=HYBRID_PROTO_WEIGHT,
+        hybrid_aam_weight=HYBRID_AAM_WEIGHT,
         augmentation_probability=0.3,
         augmentation_rir_dir=PROJECT_ROOT / "rirs_noises" / "RIRS_NOISES" / "real_rirs_isotropic_noises",
         augmentation_kwargs={

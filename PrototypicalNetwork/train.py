@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
+import math
 from pathlib import Path
 from typing import Any, Optional, List
 import matplotlib.pyplot as plt
@@ -13,75 +14,86 @@ from utils.data_augmentation import DataAugmentation
 from utils.data_preprocessing import SpeakerDataset
 from utils.general import *
 
-class PrototypicalLoss(nn.Module):
-    """
-    Prototypical loss with explicit pull/push constraints on cosine similarity.
-    """
-    def __init__(
-        self,
-        n_support,
-        n_classes,
-        n_query,
-        scale: float = 30.0,
-        margin: float = 0.2,
-        positive_target: float = 0.8,
-        negative_target: float = 0.6,
-        gap_target: float = 0.2,
-        ce_weight: float = 1.0,
-        positive_weight: float = 1.0,
-        negative_weight: float = 1.0,
-        gap_weight: float = 1.0,
-    ):
-        super(PrototypicalLoss, self).__init__()
-        self.n_support = n_support
+class AngularPrototypicalLoss(nn.Module):
+    """Angular prototypical loss over episodic class prototypes."""
+
+    def __init__(self, n_classes: int, n_query: int, scale: float = 30.0, margin: float = 0.2):
+        super().__init__()
         self.n_classes = n_classes
         self.n_query = n_query
         self.scale = scale
         self.margin = margin
-        self.positive_target = positive_target
-        self.negative_target = negative_target
-        self.gap_target = gap_target
-        self.ce_weight = ce_weight
-        self.positive_weight = positive_weight
-        self.negative_weight = negative_weight
-        self.gap_weight = gap_weight
 
-    def forward(self, logits):
-        scores = logits.view(self.n_classes, self.n_query, -1)
+    def forward(self, cosine_scores: torch.Tensor):
+        scores = cosine_scores.view(self.n_classes, self.n_query, -1)
 
         target_inds = torch.arange(0, self.n_classes, device=scores.device)
         target_inds = target_inds.view(self.n_classes, 1)
         target_inds = target_inds.expand(self.n_classes, self.n_query).long()
-        one_hot = F.one_hot(target_inds, num_classes=scores.size(-1)).to(dtype=scores.dtype)
 
         adjusted_scores = scores
         if self.margin != 0.0:
-            adjusted_scores = adjusted_scores - (self.margin * one_hot)
+            target_scores = scores.gather(2, target_inds.unsqueeze(2)).squeeze(2)
+            clamped = target_scores.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+            target_theta = torch.acos(clamped)
+            target_logits = torch.cos(target_theta + self.margin)
+            adjusted_scores = scores.clone()
+            adjusted_scores.scatter_(2, target_inds.unsqueeze(2), target_logits.unsqueeze(2))
 
         scaled_scores = adjusted_scores * self.scale
-        log_p_y = F.log_softmax(scaled_scores, dim=2)
-
-        ce_loss = -log_p_y.gather(2, target_inds.unsqueeze(2)).squeeze(2).reshape(-1).mean()
-
-        positive_scores = scores.gather(2, target_inds.unsqueeze(2)).squeeze(2)
-        negative_mask = ~one_hot.bool()
-        negative_scores = scores[negative_mask].view(self.n_classes, self.n_query, self.n_classes - 1)
-        hardest_negative_scores = negative_scores.max(dim=2).values
-
-        positive_loss = F.relu(self.positive_target - positive_scores).mean()
-        negative_loss = F.relu(hardest_negative_scores - self.negative_target).mean()
-        gap_loss = F.relu(self.gap_target - (positive_scores - hardest_negative_scores)).mean()
-
-        loss_val = (
-            self.ce_weight * ce_loss
-            + self.positive_weight * positive_loss
-            + self.negative_weight * negative_loss
-            + self.gap_weight * gap_loss
+        loss_val = F.cross_entropy(
+            scaled_scores.reshape(-1, self.n_classes),
+            target_inds.reshape(-1),
         )
-        _, y_hat = scores.max(2)
-        acc_val = y_hat.eq(target_inds).float().mean()
+        acc_val = scores.argmax(dim=2).eq(target_inds).float().mean()
+        return loss_val, acc_val
 
-        return loss_val,  acc_val
+
+class AAMSoftmaxLoss(nn.Module):
+    """ArcFace/AAM-Softmax classifier head for speaker embedding training."""
+
+    def __init__(
+        self,
+        embedding_dim: int,
+        num_classes: int,
+        scale: float = 30.0,
+        margin: float = 0.2,
+        easy_margin: bool = False,
+    ):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.num_classes = num_classes
+        self.scale = scale
+        self.margin = margin
+        self.easy_margin = easy_margin
+
+        self.weight = nn.Parameter(torch.empty(num_classes, embedding_dim))
+        nn.init.xavier_uniform_(self.weight)
+
+        self.cos_m = math.cos(margin)
+        self.sin_m = math.sin(margin)
+        self.th = math.cos(math.pi - margin)
+        self.mm = math.sin(math.pi - margin) * margin
+
+    def forward(self, embeddings: torch.Tensor, labels: torch.Tensor):
+        normalized_embeddings = F.normalize(embeddings, p=2, dim=1)
+        normalized_weight = F.normalize(self.weight, p=2, dim=1)
+        cosine = F.linear(normalized_embeddings, normalized_weight).clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+        sine = torch.sqrt((1.0 - cosine.pow(2)).clamp(min=0.0))
+        phi = cosine * self.cos_m - sine * self.sin_m
+
+        if self.easy_margin:
+            phi = torch.where(cosine > 0, phi, cosine)
+        else:
+            phi = torch.where(cosine > self.th, phi, cosine - self.mm)
+
+        one_hot = F.one_hot(labels, num_classes=self.num_classes).to(dtype=cosine.dtype)
+        logits = (one_hot * phi) + ((1.0 - one_hot) * cosine)
+        logits = logits * self.scale
+
+        loss_val = F.cross_entropy(logits, labels)
+        acc_val = logits.argmax(dim=1).eq(labels).float().mean()
+        return loss_val, acc_val
     
 def _get_tqdm():
     try:
@@ -211,32 +223,52 @@ def _prepare_episode_tensors(support_data, query_data, dataset, device):
 
     support_waveforms = []
     support_labels = []
+    support_global_labels = []
     for sample in support_data:
         idx = filepath_to_idx[sample['audio_filepath']]
         waveform, _ = dataset.load_waveform_tensor(idx)
         support_waveforms.append(waveform)
         support_labels.append(sample['episode_label'])
+        support_global_labels.append(sample['label_id'])
 
     query_waveforms = []
     query_labels = []
+    query_global_labels = []
     for sample in query_data:
         idx = filepath_to_idx[sample['audio_filepath']]
         waveform, _ = dataset.load_waveform_tensor(idx)
         query_waveforms.append(waveform)
         query_labels.append(sample['episode_label'])
+        query_global_labels.append(sample['label_id'])
 
     support_waveforms = torch.stack(support_waveforms)
     query_waveforms = torch.stack(query_waveforms)
     support_mels = dataset.waveforms_to_mels(support_waveforms, device)
     support_labels = torch.tensor(support_labels, device=device)
+    support_global_labels = torch.tensor(support_global_labels, device=device)
     query_mels = dataset.waveforms_to_mels(query_waveforms, device)
     query_labels = torch.tensor(query_labels, device=device)
+    query_global_labels = torch.tensor(query_global_labels, device=device)
 
-    return support_mels, support_labels, query_mels, query_labels
+    return (
+        support_mels,
+        support_labels,
+        support_global_labels,
+        query_mels,
+        query_labels,
+        query_global_labels,
+    )
 
 
 def _forward_episode(model, support_data, query_data, dataset, device, n_way):
-    support_mels, support_labels, query_mels, query_labels = _prepare_episode_tensors(
+    (
+        support_mels,
+        support_labels,
+        support_global_labels,
+        query_mels,
+        query_labels,
+        query_global_labels,
+    ) = _prepare_episode_tensors(
         support_data=support_data,
         query_data=query_data,
         dataset=dataset,
@@ -246,9 +278,17 @@ def _forward_episode(model, support_data, query_data, dataset, device, n_way):
     support_embeddings = model(support_mels)
     query_embeddings = model(query_mels)
     prototypes = compute_prototypes(support_embeddings, support_labels, n_way)
-    logits = model.pn_predict(query_embeddings, prototypes)
+    prototype_scores = model.pn_predict(query_embeddings, prototypes)
 
-    return logits, query_labels
+    return {
+        "support_embeddings": support_embeddings,
+        "query_embeddings": query_embeddings,
+        "prototypes": prototypes,
+        "prototype_scores": prototype_scores,
+        "query_episode_labels": query_labels,
+        "support_global_labels": support_global_labels,
+        "query_global_labels": query_global_labels,
+    }
 
 
 def _extract_verification_scores(logits: torch.Tensor, query_labels: torch.Tensor):
@@ -376,7 +416,34 @@ def _plot_det_curve(
     plt.close()
     print(f"DET curve saved to {output_path}")
 
-def train_episode(model, support_data, query_data, dataset, loss_fn, optimizer, device, n_way):
+def _remap_classifier_labels(global_labels: torch.Tensor, label_to_index: dict[int, int]) -> torch.Tensor:
+    mapped = [label_to_index[int(label)] for label in global_labels.detach().cpu().tolist()]
+    return torch.tensor(mapped, device=global_labels.device, dtype=torch.long)
+
+
+def _prototype_accuracy(prototype_scores: torch.Tensor, query_labels: torch.Tensor) -> float:
+    predicted = prototype_scores.argmax(dim=1)
+    correct = predicted.eq(query_labels).sum().item()
+    total = query_labels.size(0)
+    return 100.0 * correct / total
+
+
+def train_episode(
+    model,
+    support_data,
+    query_data,
+    dataset,
+    prototype_loss_fn,
+    optimizer,
+    device,
+    n_way,
+    *,
+    loss_mode: str,
+    classifier_label_map: dict[int, int] | None = None,
+    aam_loss_fn: Optional[AAMSoftmaxLoss] = None,
+    hybrid_proto_weight: float = 1.0,
+    hybrid_aam_weight: float = 1.0,
+):
     """
     Train one episode of prototypical network
 
@@ -395,7 +462,7 @@ def train_episode(model, support_data, query_data, dataset, loss_fn, optimizer, 
     
     model.train()
 
-    distance, query_labels = _forward_episode(
+    episode_output = _forward_episode(
         model=model,
         support_data=support_data,
         query_data=query_data,
@@ -403,22 +470,54 @@ def train_episode(model, support_data, query_data, dataset, loss_fn, optimizer, 
         device=device,
         n_way=n_way,
     )
+    prototype_scores = episode_output["prototype_scores"]
+    query_labels = episode_output["query_episode_labels"]
 
-    # Compute loss
-    loss, _ = loss_fn(distance)
+    proto_loss, _ = prototype_loss_fn(prototype_scores)
+    total_loss = proto_loss
+
+    if loss_mode == "aam_softmax":
+        if aam_loss_fn is None or classifier_label_map is None:
+            raise ValueError("AAM-Softmax training requires classifier_label_map and aam_loss_fn.")
+        classifier_embeddings = torch.cat(
+            [episode_output["support_embeddings"], episode_output["query_embeddings"]],
+            dim=0,
+        )
+        classifier_labels = _remap_classifier_labels(
+            torch.cat(
+                [episode_output["support_global_labels"], episode_output["query_global_labels"]],
+                dim=0,
+            ),
+            classifier_label_map,
+        )
+        total_loss, _ = aam_loss_fn(classifier_embeddings, classifier_labels)
+    elif loss_mode == "hybrid":
+        if aam_loss_fn is None or classifier_label_map is None:
+            raise ValueError("Hybrid loss requires classifier_label_map and aam_loss_fn.")
+        classifier_embeddings = torch.cat(
+            [episode_output["support_embeddings"], episode_output["query_embeddings"]],
+            dim=0,
+        )
+        classifier_labels = _remap_classifier_labels(
+            torch.cat(
+                [episode_output["support_global_labels"], episode_output["query_global_labels"]],
+                dim=0,
+            ),
+            classifier_label_map,
+        )
+        aam_loss, _ = aam_loss_fn(classifier_embeddings, classifier_labels)
+        total_loss = (hybrid_proto_weight * proto_loss) + (hybrid_aam_weight * aam_loss)
+    elif loss_mode != "angular_proto":
+        raise ValueError(f"Unsupported loss_mode: {loss_mode}")
     
     # Backward pass
-    loss.backward()
+    total_loss.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     optimizer.step()
 
-    # Compute accuracy
-    _, predicted = distance.max(1)
-    correct = predicted.eq(query_labels).sum().item()
-    total = query_labels.size(0)
-    accuracy = 100. * correct / total
+    accuracy = _prototype_accuracy(prototype_scores, query_labels)
 
-    return loss.item(), accuracy
+    return total_loss.item(), accuracy
 
 
 def validate_episode(model, support_data, query_data, dataset, criterion, device, n_way):
@@ -426,7 +525,7 @@ def validate_episode(model, support_data, query_data, dataset, criterion, device
     model.eval()
 
     with torch.no_grad():
-        distances, query_labels = _forward_episode(
+        episode_output = _forward_episode(
             model=model,
             support_data=support_data,
             query_data=query_data,
@@ -434,13 +533,12 @@ def validate_episode(model, support_data, query_data, dataset, criterion, device
             device=device,
             n_way=n_way,
         )
+        prototype_scores = episode_output["prototype_scores"]
+        query_labels = episode_output["query_episode_labels"]
 
         # Compute loss and accuracy
-        loss, _ = criterion(distances)
-        _, predicted = distances.max(1)
-        correct = predicted.eq(query_labels).sum().item()
-        total = query_labels.size(0)
-        accuracy = 100. * correct / total
+        loss, _ = criterion(prototype_scores)
+        accuracy = _prototype_accuracy(prototype_scores, query_labels)
 
     return loss.item(), accuracy
 
@@ -485,7 +583,7 @@ def evaluate_test_episodes(
             test_support, test_query = sample_episode(test_data, n_way, k_shot, n_query)
             model.eval()
             with torch.no_grad():
-                test_logits, test_query_labels = _forward_episode(
+                episode_output = _forward_episode(
                     model=model,
                     support_data=test_support,
                     query_data=test_query,
@@ -493,12 +591,11 @@ def evaluate_test_episodes(
                     device=device,
                     n_way=n_way,
                 )
+                test_logits = episode_output["prototype_scores"]
+                test_query_labels = episode_output["query_episode_labels"]
 
             test_loss, _ = loss_fn(test_logits)
-            _, predicted = test_logits.max(1)
-            correct = predicted.eq(test_query_labels).sum().item()
-            total = test_query_labels.size(0)
-            test_acc = 100.0 * correct / total
+            test_acc = _prototype_accuracy(test_logits, test_query_labels)
 
             episode_scores, episode_labels = _extract_verification_scores(
                 test_logits,
@@ -561,15 +658,13 @@ def train_prototypical_network(
     augmentation_rir_dir: Optional[str | Path] = None,
     augmentation_kwargs: Optional[dict] = None,
     show_progress: bool = True,
+    training_loss_mode: str = "aam_softmax",
     proto_scale: float = 30.0,
     proto_margin: float = 0.2,
-    positive_similarity_target: float = 0.8,
-    negative_similarity_target: float = 0.6,
-    similarity_gap_target: float = 0.2,
-    ce_loss_weight: float = 1.0,
-    positive_loss_weight: float = 1.0,
-    negative_loss_weight: float = 1.0,
-    gap_loss_weight: float = 1.0,
+    aam_scale: float = 30.0,
+    aam_margin: float = 0.2,
+    hybrid_proto_weight: float = 1.0,
+    hybrid_aam_weight: float = 1.0,
     init_checkpoint_path: Optional[str | Path] = None,
     model_path: str | Path = "output/ECAPATDNN_protonet_model.pth",
     eval_seed: Optional[int] = None,
@@ -593,17 +688,18 @@ def train_prototypical_network(
     print(f"  {n_query} query samples per class")
     print(f"  {n_episodes} training episodes")
     print(f"  {n_val_episodes} validation episodes")
-    print(f"  Cosine scale: {proto_scale}")
-    print(f"  Cosine margin: {proto_margin}")
+    print(f"  Training loss mode: {training_loss_mode}")
+    print(f"  Angular proto scale: {proto_scale}")
+    print(f"  Angular proto margin: {proto_margin}")
+    print(f"  AAM scale: {aam_scale}")
+    print(f"  AAM margin: {aam_margin}")
     print(f"  VAD enabled: {vad_enabled}")
     if vad_enabled:
         print(f"  VAD top_db: {vad_top_db}")
         print(f"  VAD frame_length: {vad_frame_length}")
         print(f"  VAD hop_length: {vad_hop_length}")
-    print(f"  Positive similarity target: {positive_similarity_target}")
-    print(f"  Negative similarity target: {negative_similarity_target}")
-    print(f"  Similarity gap target: {similarity_gap_target}")
-    print(f"  Loss weights: ce={ce_loss_weight}, pos={positive_loss_weight}, neg={negative_loss_weight}, gap={gap_loss_weight}")
+    if training_loss_mode == "hybrid":
+        print(f"  Hybrid weights: proto={hybrid_proto_weight}, aam={hybrid_aam_weight}")
 
     if train_mode:
         _validate_episode_configuration(
@@ -700,21 +796,31 @@ def train_prototypical_network(
     print(f"  Trainable: {trainable_params:,}")
 
     # Loss and optimizer
-    loss_fn = PrototypicalLoss(
-        n_support=k_shot,
+    prototype_loss_fn = AngularPrototypicalLoss(
         n_classes=n_way,
         n_query=n_query,
         scale=proto_scale,
         margin=proto_margin,
-        positive_target=positive_similarity_target,
-        negative_target=negative_similarity_target,
-        gap_target=similarity_gap_target,
-        ce_weight=ce_loss_weight,
-        positive_weight=positive_loss_weight,
-        negative_weight=negative_loss_weight,
-        gap_weight=gap_loss_weight,
     )
-    optimizer = optim.AdamW(model.parameters(), lr=0.0001, weight_decay=0.01)
+
+    train_classifier_map: dict[int, int] | None = None
+    aam_loss_fn: Optional[AAMSoftmaxLoss] = None
+    optimizer_params = list(model.parameters())
+
+    if training_loss_mode in {"aam_softmax", "hybrid"}:
+        train_speaker_ids = sorted({item["label_id"] for item in train_data})
+        train_classifier_map = {label_id: idx for idx, label_id in enumerate(train_speaker_ids)}
+        aam_loss_fn = AAMSoftmaxLoss(
+            embedding_dim=192,
+            num_classes=len(train_speaker_ids),
+            scale=aam_scale,
+            margin=aam_margin,
+        ).to(device)
+        optimizer_params.extend(list(aam_loss_fn.parameters()))
+    elif training_loss_mode != "angular_proto":
+        raise ValueError("training_loss_mode must be one of: angular_proto, aam_softmax, hybrid")
+
+    optimizer = optim.AdamW(optimizer_params, lr=0.0001, weight_decay=0.01)
 
     # Learning rate scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -753,7 +859,12 @@ def train_prototypical_network(
                 # Train on episode
                 loss, acc = train_episode(
                     model, support_data, query_data, dataset,
-                    loss_fn, optimizer, device, n_way
+                    prototype_loss_fn, optimizer, device, n_way,
+                    loss_mode=training_loss_mode,
+                    classifier_label_map=train_classifier_map,
+                    aam_loss_fn=aam_loss_fn,
+                    hybrid_proto_weight=hybrid_proto_weight,
+                    hybrid_aam_weight=hybrid_aam_weight,
                 )
 
                 train_losses.append(loss)
@@ -769,7 +880,7 @@ def train_prototypical_network(
                             val_support, val_query = sample_episode(val_data, n_way, k_shot, n_query)
                             val_loss, val_acc = validate_episode(
                                 model, val_support, val_query, val_dataset,
-                                loss_fn, device, n_way
+                                prototype_loss_fn, device, n_way
                             )
                             val_losses.append(val_loss)
                             val_accs.append(val_acc)
@@ -814,7 +925,7 @@ def train_prototypical_network(
         model=model,
         test_data=test_data,
         test_dataset=test_dataset,
-        loss_fn=loss_fn,
+        loss_fn=prototype_loss_fn,
         device=device,
         n_way=n_way,
         k_shot=k_shot,
