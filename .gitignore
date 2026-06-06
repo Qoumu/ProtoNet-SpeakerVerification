@@ -1,0 +1,43 @@
+# Python cache and tooling
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor and local agent state
+.vscode/
+.codex
+.agents/
+
+# OS and temp files
+.DS_Store
+*.log
+*.tmp
+
+# Local environment files
+.env
+.env.*
+
+# Generated datasets and calibration assets
+audio_data/
+ecapa_tdnn_audio_calib/
+rknn_calibration_librispeech_100/
+rirs_noises/
+dataset_absolute.txt
+
+# Generated model exports and evaluation output
+output/
+enrolled_speakers.pt
+enrolled_speakers.npy
+enrolled_speakers_ids.txt
+ecapa_tdnn.onnx
+ecapa_tdnn.onnx.data
+*.rknn

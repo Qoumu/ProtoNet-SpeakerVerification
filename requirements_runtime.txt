@@ -1,0 +1,7 @@
+# Minimal runtime dependencies for the Docker speaker verification/enrollment image.
+# Keep this small so the Raspberry Pi deployment image only installs what it needs.
+
+numpy==1.26.4
+torch==2.9.1
+torchaudio==2.9.1
+soundfile==0.13.1

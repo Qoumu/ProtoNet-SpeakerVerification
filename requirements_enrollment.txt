@@ -1,0 +1,26 @@
+# Host-side Python dependencies used directly by this repository.
+#
+# This file is intentionally scoped to repo dependencies, not every package
+# installed on the developer machine. The active local Python environment
+# currently contains many unrelated packages that should not be frozen here.
+#
+# Covers:
+# - training / evaluation
+# - host-side enrollment
+# - container CLI runtime
+# - ONNX validation
+# - RKNN calibration helpers
+#
+# Does not include:
+# - rknn-toolkit2, which must be installed separately in a supported environment
+
+numpy>=1.26,<2
+torch>=2.4,<3
+torchaudio>=2.4,<3
+soundfile>=0.13,<1
+librosa>=0.11,<1
+matplotlib>=3.8,<4
+scipy>=1.13,<2
+onnx>=1.16,<2
+onnxruntime>=1.18,<2
+tqdm>=4.66,<5
