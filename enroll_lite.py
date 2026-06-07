@@ -16,12 +16,203 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import numpy as np
+import soundfile as sf
 
 try:
     import torch
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
+
+
+DEFAULT_NUM_SUB_PROTOTYPES = 3
+
+
+def _normalize_embedding_vector(embedding: np.ndarray) -> np.ndarray:
+    emb = np.asarray(embedding, dtype=np.float32).reshape(-1)
+    if emb.size == 0:
+        raise ValueError("Embedding is empty")
+    norm = float(np.linalg.norm(emb))
+    if norm == 0.0:
+        raise ValueError("Embedding norm is zero")
+    return emb / norm
+
+
+def _run_kmeans(
+    embeddings: np.ndarray,
+    *,
+    num_clusters: int,
+    max_iters: int,
+    seed: int,
+) -> np.ndarray:
+    if embeddings.ndim != 2 or embeddings.shape[0] == 0:
+        raise ValueError(
+            f"Expected a non-empty 2D embedding matrix, got shape {embeddings.shape}"
+        )
+
+    vectors = np.asarray(embeddings, dtype=np.float32)
+    rng = np.random.default_rng(seed)
+    n_samples = vectors.shape[0]
+
+    if n_samples == 1:
+        centers = np.repeat(vectors, num_clusters, axis=0)
+        return np.stack([_normalize_embedding_vector(center) for center in centers], axis=0)
+
+    init_count = min(num_clusters, n_samples)
+    center_indices = [int(rng.integers(n_samples))]
+    while len(center_indices) < init_count:
+        current = vectors[center_indices]
+        distances = np.sum((vectors[:, None, :] - current[None, :, :]) ** 2, axis=2)
+        min_distances = distances.min(axis=1)
+        min_distances[center_indices] = 0.0
+        if float(min_distances.sum()) <= 0.0:
+            remaining = [idx for idx in range(n_samples) if idx not in center_indices]
+            if not remaining:
+                break
+            center_indices.append(remaining[0])
+            continue
+        probs = min_distances / min_distances.sum()
+        next_index = int(rng.choice(n_samples, p=probs))
+        if next_index not in center_indices:
+            center_indices.append(next_index)
+
+    centers = vectors[center_indices].copy()
+    if centers.shape[0] < num_clusters:
+        pad = np.repeat(centers[-1:, :], num_clusters - centers.shape[0], axis=0)
+        centers = np.concatenate([centers, pad], axis=0)
+
+    for _ in range(max_iters):
+        distances = np.sum((vectors[:, None, :] - centers[None, :, :]) ** 2, axis=2)
+        assignments = distances.argmin(axis=1)
+        new_centers = centers.copy()
+
+        for cluster_idx in range(num_clusters):
+            mask = assignments == cluster_idx
+            if np.any(mask):
+                new_centers[cluster_idx] = vectors[mask].mean(axis=0)
+            else:
+                farthest_index = int(distances.min(axis=1).argmax())
+                new_centers[cluster_idx] = vectors[farthest_index]
+
+        if np.allclose(new_centers, centers, atol=1e-5):
+            centers = new_centers
+            break
+        centers = new_centers
+
+    return np.stack([_normalize_embedding_vector(center) for center in centers], axis=0)
+
+
+def _collect_chunk_embeddings_torch(
+    audio_files: Iterable[Path],
+    *,
+    model_path: Path,
+    sr: int,
+    n_mels: int,
+    duration: float,
+    n_fft: int,
+    hop_length: int,
+    chunk_duration: Optional[float],
+    chunk_overlap: float,
+    verbose: bool,
+) -> np.ndarray:
+    if not TORCH_AVAILABLE:
+        raise ImportError("PyTorch is required for host-side enrollment")
+
+    from utils.model_functions import load_model
+    import torch.nn.functional as F
+    import torchaudio.functional as AF
+    import torchaudio.transforms as AT
+
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model not found: {model_path}")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if verbose:
+        print(f"Using device: {device}")
+
+    model = load_model(
+        model_path,
+        device=device,
+        n_mels=n_mels,
+        channels=512,
+    )
+
+    embeddings: list[np.ndarray] = []
+    chunk_dur = chunk_duration or duration
+    chunk_size = max(1, int(chunk_dur * sr))
+    overlap_size = max(0, int(chunk_overlap * sr))
+    step_size = max(1, chunk_size - overlap_size)
+    target_frames = int(duration * sr / hop_length)
+    mel_transform = AT.MelSpectrogram(
+        sample_rate=sr,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        n_mels=n_mels,
+        power=2.0,
+        f_min=0.0,
+        f_max=sr / 2.0,
+    )
+    db_transform = AT.AmplitudeToDB(stype="power")
+
+    for audio_path in audio_files:
+        audio_path = Path(audio_path)
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+        if verbose:
+            print(f"  Processing: {audio_path.name}")
+
+        waveform, sr_loaded = sf.read(str(audio_path), dtype="float32", always_2d=False)
+        waveform = np.asarray(waveform, dtype=np.float32)
+        if waveform.ndim == 2:
+            waveform = waveform.mean(axis=1)
+        if waveform.ndim != 1 or waveform.size == 0:
+            raise ValueError(f"Failed to load a valid mono waveform from {audio_path}")
+
+        waveform_tensor = torch.from_numpy(waveform)
+        if int(sr_loaded) != sr:
+            waveform_tensor = AF.resample(
+                waveform_tensor,
+                orig_freq=int(sr_loaded),
+                new_freq=sr,
+            )
+
+        chunk_count = 0
+        for start in range(0, int(waveform_tensor.shape[0]), step_size):
+            end = start + chunk_size
+            chunk = waveform_tensor[start:end]
+            if chunk.shape[0] < chunk_size:
+                chunk = F.pad(chunk, (0, chunk_size - chunk.shape[0]))
+
+            mel = db_transform(mel_transform(chunk.float()))
+            current_frames = int(mel.shape[1])
+            if current_frames > target_frames:
+                offset = (current_frames - target_frames) // 2
+                mel = mel[:, offset : offset + target_frames]
+            elif current_frames < target_frames:
+                mel = F.pad(
+                    mel,
+                    (0, target_frames - current_frames),
+                    value=float(torch.min(mel).item()),
+                )
+            mel = (mel - mel.mean()) / (mel.std() + 1e-8)
+
+            with torch.no_grad():
+                emb = model(mel.unsqueeze(0).to(device)).squeeze(0).cpu().numpy().astype(np.float32)
+            embeddings.append(_normalize_embedding_vector(emb))
+            chunk_count += 1
+            if end >= int(waveform_tensor.shape[0]):
+                break
+
+        if chunk_count == 0:
+            if verbose:
+                print(f"    Warning: No usable chunks from {audio_path.name}")
+            continue
+
+    if not embeddings:
+        raise ValueError("No usable embeddings were generated from the supplied audio files.")
+
+    return np.stack(embeddings, axis=0)
 
 
 def enroll_speaker_torch(
@@ -51,77 +242,72 @@ def enroll_speaker_torch(
     Returns:
         Speaker embedding as float32 numpy array
     """
-    if not TORCH_AVAILABLE:
-        raise ImportError("PyTorch is required for host-side enrollment")
-
-    import torch.nn.functional as F
-    from utils.data_preprocessing import audio_chunking, audio_to_mel_spectrogram
-    from utils.model_functions import load_model
-
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model not found: {model_path}")
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if verbose:
-        print(f"Using device: {device}")
-
-    model = load_model(
-        model_path,
-        device=device,
+    embeddings = _collect_chunk_embeddings_torch(
+        audio_files=audio_files,
+        model_path=model_path,
+        sr=sr,
         n_mels=n_mels,
-        emb_dim=64,
-        channels=512,
+        duration=duration,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        chunk_duration=chunk_duration,
+        chunk_overlap=chunk_overlap,
+        verbose=verbose,
+    )
+    return _normalize_embedding_vector(embeddings.mean(axis=0))
+
+
+def build_enrollment_profile_torch(
+    speaker_id: str,
+    audio_files: Iterable[Path],
+    *,
+    model_path: Path = Path("ECAPATDNN_protonet_model.pth"),
+    sr: int = 16000,
+    n_mels: int = 80,
+    duration: float = 3.0,
+    n_fft: int = 512,
+    hop_length: int = 256,
+    chunk_duration: Optional[float] = None,
+    chunk_overlap: float = 0.5,
+    num_sub_prototypes: int = DEFAULT_NUM_SUB_PROTOTYPES,
+    kmeans_max_iters: int = 50,
+    kmeans_seed: int = 0,
+    verbose: bool = False,
+) -> dict[str, object]:
+    chunk_embeddings = _collect_chunk_embeddings_torch(
+        audio_files=audio_files,
+        model_path=model_path,
+        sr=sr,
+        n_mels=n_mels,
+        duration=duration,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        chunk_duration=chunk_duration,
+        chunk_overlap=chunk_overlap,
+        verbose=verbose,
     )
 
-    embeddings: list[torch.Tensor] = []
-    chunk_dur = chunk_duration or duration
+    primary_embedding = _normalize_embedding_vector(chunk_embeddings.mean(axis=0))
+    sub_prototypes = _run_kmeans(
+        chunk_embeddings,
+        num_clusters=max(1, num_sub_prototypes),
+        max_iters=max(1, kmeans_max_iters),
+        seed=kmeans_seed,
+    )
 
-    for audio_path in audio_files:
-        audio_path = Path(audio_path)
-        if not audio_path.exists():
-            raise FileNotFoundError(f"Audio file not found: {audio_path}")
-
-        if verbose:
-            print(f"  Processing: {audio_path.name}")
-
-        _, y, sr_loaded = audio_to_mel_spectrogram(
-            audio_path=audio_path,
-            sr=sr,
-            duration=None,
-            n_fft=n_fft,
-            hop_length=hop_length,
-            n_mels=n_mels,
-            to_db=True,
+    if verbose:
+        print(
+            f"  Built enrollment profile for '{speaker_id}' "
+            f"from {chunk_embeddings.shape[0]} chunk embedding(s)"
         )
+        print(f"  Saved {sub_prototypes.shape[0]} sub-prototype(s)")
 
-        mel_chunks = audio_chunking(
-            y,
-            sr_loaded,
-            chunk_duration=chunk_dur,
-            overlap_duration=chunk_overlap,
-            return_mels=True,
-            n_mels=n_mels,
-            n_fft=n_fft,
-            hop_length=hop_length,
-            target_duration=duration,
-        )
-
-        if not mel_chunks:
-            if verbose:
-                print(f"    Warning: No usable chunks from {audio_path.name}")
-            continue
-
-        for mel in mel_chunks:
-            with torch.no_grad():
-                emb = model(mel.to(device)).squeeze(0).cpu()
-            embeddings.append(emb)
-
-    if not embeddings:
-        raise ValueError(f"No usable embeddings for speaker {speaker_id}")
-
-    stacked = torch.stack(embeddings, dim=0)
-    speaker_embedding = F.normalize(stacked.mean(dim=0), p=2, dim=0).cpu()
-    return speaker_embedding.numpy().astype(np.float32)
+    return {
+        "embedding": primary_embedding,
+        "sub_prototypes": sub_prototypes.astype(np.float32, copy=False),
+        "num_source_embeddings": int(chunk_embeddings.shape[0]),
+        "num_sub_prototypes": int(sub_prototypes.shape[0]),
+    }
 
 
 def _default_speaker_ids_path(store_path: Path) -> Path:
@@ -138,13 +324,7 @@ def _resolve_store_path(store_path: Path) -> Path:
 
 
 def _normalize_embedding(embedding: np.ndarray) -> np.ndarray:
-    emb = np.asarray(embedding, dtype=np.float32).reshape(-1)
-    if emb.size == 0:
-        raise ValueError("Embedding is empty")
-    norm = float(np.linalg.norm(emb))
-    if norm == 0.0:
-        raise ValueError("Embedding norm is zero")
-    return emb / norm
+    return _normalize_embedding_vector(embedding)
 
 
 def _embedding_tensor_from_payload(payload: object, *, store_path: Path) -> "torch.Tensor":
@@ -178,6 +358,38 @@ def _embedding_tensor_from_payload(payload: object, *, store_path: Path) -> "tor
     return tensor / norm
 
 
+def _subprototype_tensors_from_payload(payload: object, *, store_path: Path) -> list["torch.Tensor"]:
+    if not TORCH_AVAILABLE:
+        raise ImportError("PyTorch is required for .pt enrollment stores")
+
+    if not isinstance(payload, dict) or "sub_prototypes" not in payload:
+        return []
+
+    sub_prototypes = payload["sub_prototypes"]
+    if hasattr(sub_prototypes, "detach"):
+        tensor = sub_prototypes.detach().cpu().float()
+    elif isinstance(sub_prototypes, np.ndarray):
+        tensor = torch.from_numpy(np.asarray(sub_prototypes, dtype=np.float32))
+    elif isinstance(sub_prototypes, (list, tuple)):
+        tensor = torch.as_tensor(sub_prototypes, dtype=torch.float32)
+    else:
+        raise ValueError(
+            f"Unsupported sub_prototypes type {type(sub_prototypes).__name__} in {store_path}"
+        )
+
+    if tensor.ndim == 1:
+        tensor = tensor.unsqueeze(0)
+    if tensor.ndim != 2 or tensor.shape[1] == 0:
+        raise ValueError(
+            f"Expected sub_prototypes to have shape [N, D] in {store_path}, got {tuple(tensor.shape)}"
+        )
+
+    normalized: list[torch.Tensor] = []
+    for row in tensor:
+        normalized.append(_embedding_tensor_from_payload(row, store_path=store_path))
+    return normalized
+
+
 def load_enrollment_pt_store(store_path: Path) -> dict[str, "torch.Tensor"]:
     """Load a `.pt` speaker store keyed by speaker ID."""
     store_path = Path(store_path)
@@ -207,6 +419,51 @@ def load_enrollment_pt_store(store_path: Path) -> dict[str, "torch.Tensor"]:
                 f"got {embedding.numel()} for speaker '{speaker_id}'"
             )
         store[speaker_id] = embedding
+
+    return store
+
+
+def load_enrollment_pt_store_entries(store_path: Path) -> dict[str, dict[str, object]]:
+    """Load a `.pt` speaker store with optional per-speaker sub-prototypes."""
+    store_path = Path(store_path)
+    if store_path.suffix != ".pt":
+        raise ValueError("Expected a .pt enrollment store")
+    if not store_path.exists():
+        return {}
+    if not TORCH_AVAILABLE:
+        raise ImportError("PyTorch is required for .pt enrollment stores")
+
+    payload = torch.load(store_path, map_location="cpu")
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected dict payload in {store_path}, got {type(payload).__name__}")
+
+    store: dict[str, dict[str, object]] = {}
+    embedding_dim: Optional[int] = None
+    for speaker_id, value in payload.items():
+        if not isinstance(speaker_id, str) or not speaker_id or "\n" in speaker_id:
+            raise ValueError(f"Invalid speaker ID in {store_path}: {speaker_id!r}")
+
+        embedding = _embedding_tensor_from_payload(value, store_path=store_path)
+        sub_prototypes = _subprototype_tensors_from_payload(value, store_path=store_path)
+        if embedding_dim is None:
+            embedding_dim = int(embedding.numel())
+        elif embedding.numel() != embedding_dim:
+            raise ValueError(
+                f"Embedding dimension mismatch in {store_path}: expected {embedding_dim}, "
+                f"got {embedding.numel()} for speaker '{speaker_id}'"
+            )
+
+        for sub_idx, sub_prototype in enumerate(sub_prototypes):
+            if sub_prototype.numel() != embedding_dim:
+                raise ValueError(
+                    f"Sub-prototype dimension mismatch in {store_path}: expected {embedding_dim}, "
+                    f"got {sub_prototype.numel()} for speaker '{speaker_id}' entry {sub_idx}"
+                )
+
+        store[speaker_id] = {
+            "embedding": embedding,
+            "sub_prototypes": sub_prototypes,
+        }
 
     return store
 
@@ -254,6 +511,8 @@ def save_enrollment_pt(
     speaker_id: str,
     embedding: np.ndarray,
     store_path: Path,
+    *,
+    sub_prototypes: Optional[np.ndarray] = None,
     verbose: bool = False,
 ) -> None:
     """Save or update speaker embeddings in a `.pt` store keyed by speaker ID."""
@@ -274,12 +533,41 @@ def save_enrollment_pt(
     if store and speaker_id not in store:
         action = "Appended"
 
-    store[speaker_id] = torch.from_numpy(normalized)
+    entry: torch.Tensor | dict[str, object]
+    if sub_prototypes is None:
+        entry = torch.from_numpy(normalized)
+    else:
+        subprototype_array = np.asarray(sub_prototypes, dtype=np.float32)
+        if subprototype_array.ndim == 1:
+            subprototype_array = subprototype_array.reshape(1, -1)
+        if subprototype_array.ndim != 2:
+            raise ValueError(
+                f"sub_prototypes must be 1D or 2D, got shape {subprototype_array.shape}"
+            )
+        if subprototype_array.shape[1] != normalized.shape[0]:
+            raise ValueError(
+                f"Sub-prototype dimension mismatch: embedding has {normalized.shape[0]}, "
+                f"sub_prototypes have {subprototype_array.shape[1]}"
+            )
+
+        normalized_subprototypes = np.stack(
+            [_normalize_embedding_vector(row) for row in subprototype_array],
+            axis=0,
+        )
+        entry = {
+            "embedding": torch.from_numpy(normalized),
+            "sub_prototypes": torch.from_numpy(normalized_subprototypes),
+            "num_sub_prototypes": int(normalized_subprototypes.shape[0]),
+        }
+
+    store[speaker_id] = entry
     torch.save(store, store_path)
 
     if verbose:
         print(f"{action} enrollment for '{speaker_id}':")
         print(f"  Speaker store: {store_path} ({len(store)} speaker(s), format=pt)")
+        if sub_prototypes is not None:
+            print(f"  Sub-prototypes: {np.asarray(sub_prototypes).shape[0]}")
 
 
 def save_enrollment_npy(
@@ -345,6 +633,7 @@ def save_enrollment(
     embedding: np.ndarray,
     store_path: Path = Path("enrolled_speakers.pt"),
     speaker_ids_path: Optional[Path] = None,
+    sub_prototypes: Optional[np.ndarray] = None,
     verbose: bool = False,
 ) -> None:
     """Save or update speaker embeddings in a `.pt` or legacy `.npy` store."""
@@ -357,9 +646,13 @@ def save_enrollment(
             speaker_id=speaker_id,
             embedding=embedding,
             store_path=store_path,
+            sub_prototypes=sub_prototypes,
             verbose=verbose,
         )
         return
+
+    if sub_prototypes is not None and verbose:
+        print("Warning: legacy .npy enrollment stores do not persist sub-prototypes; saving primary only.")
 
     save_enrollment_npy(
         speaker_id=speaker_id,
@@ -451,6 +744,24 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable verbose output"
     )
+    parser.add_argument(
+        "--num-sub-prototypes",
+        type=int,
+        default=DEFAULT_NUM_SUB_PROTOTYPES,
+        help="Number of k-means sub-prototypes to save for each speaker in a .pt store."
+    )
+    parser.add_argument(
+        "--kmeans-max-iters",
+        type=int,
+        default=50,
+        help="Maximum number of k-means iterations for sub-prototype clustering."
+    )
+    parser.add_argument(
+        "--kmeans-seed",
+        type=int,
+        default=0,
+        help="Random seed for k-means sub-prototype initialization."
+    )
 
     return parser.parse_args()
 
@@ -463,7 +774,7 @@ def main() -> None:
         print(f"Audio files: {len(args.audio_files)}")
 
     try:
-        embedding = enroll_speaker_torch(
+        profile = build_enrollment_profile_torch(
             speaker_id=args.speaker_id,
             audio_files=args.audio_files,
             model_path=args.model_path,
@@ -474,14 +785,18 @@ def main() -> None:
             hop_length=args.hop_length,
             chunk_duration=args.chunk_duration,
             chunk_overlap=args.chunk_overlap,
+            num_sub_prototypes=args.num_sub_prototypes,
+            kmeans_max_iters=args.kmeans_max_iters,
+            kmeans_seed=args.kmeans_seed,
             verbose=args.verbose,
         )
 
         save_enrollment(
             speaker_id=args.speaker_id,
-            embedding=embedding,
+            embedding=np.asarray(profile["embedding"], dtype=np.float32),
             store_path=args.store_path,
             speaker_ids_path=args.speaker_ids_path,
+            sub_prototypes=np.asarray(profile["sub_prototypes"], dtype=np.float32),
             verbose=args.verbose,
         )
 

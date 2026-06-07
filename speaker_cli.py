@@ -12,8 +12,13 @@ import torch
 import torch.nn.functional as F
 import torchaudio
 
-from enroll_lite import load_enrollment_pt_store, save_enrollment_pt
+from enroll_lite import (
+    build_enrollment_profile_torch,
+    load_enrollment_pt_store_entries,
+    save_enrollment_pt,
+)
 from model.ECAPATDNN import ECAPATDNNBackbone
+from utils.model_functions import load_model
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -86,12 +91,7 @@ def _load_model(
     device: torch.device,
     n_mels: int,
 ) -> ECAPATDNNBackbone:
-    model = ECAPATDNNBackbone(n_mels=n_mels, channels=512, emb_dim=64)
-    state = torch.load(model_path, map_location=device)
-    model.load_state_dict(state)
-    model.to(device)
-    model.eval()
-    return model
+    return load_model(model_path, device=device, n_mels=n_mels)
 
 
 def _load_waveform(audio_path: Path, *, target_sr: int) -> torch.Tensor:
@@ -254,7 +254,7 @@ def _verify(args: argparse.Namespace) -> int:
     store_path = _positive_path(args.store_path, label="Enrollment store")
     audio_files = [_positive_path(path, label="Input audio") for path in args.input_audio]
 
-    store = load_enrollment_pt_store(store_path)
+    store = load_enrollment_pt_store_entries(store_path)
     if not store:
         raise ValueError(f"Enrollment store is empty: {store_path}")
 
@@ -278,13 +278,21 @@ def _verify(args: argparse.Namespace) -> int:
     )
 
     scored_matches = []
-    for speaker_id, embedding in store.items():
-        similarity = _cosine_similarity(query_embedding, embedding.numpy())
+    for speaker_id, entry in store.items():
+        candidate_embeddings = list(entry["sub_prototypes"]) or [entry["embedding"]]
+        candidate_scores = [
+            _cosine_similarity(query_embedding, embedding.numpy())
+            for embedding in candidate_embeddings
+        ]
+        best_index = int(np.argmax(candidate_scores))
+        similarity = float(candidate_scores[best_index])
         scored_matches.append(
             {
                 "speaker_id": speaker_id,
                 "similarity": similarity,
                 "distance": 1.0 - similarity,
+                "sub_prototype_index": best_index,
+                "num_sub_prototypes": len(candidate_embeddings),
             }
         )
 
@@ -348,7 +356,8 @@ def _enroll(args: argparse.Namespace) -> int:
     audio_files = [_positive_path(path, label="Enrollment audio") for path in args.audio_files]
     store_path = Path(args.store_path).expanduser().resolve()
 
-    embedding = _build_embedding(
+    profile = build_enrollment_profile_torch(
+        speaker_id=args.speaker_id,
         audio_files=audio_files,
         model_path=model_path,
         sr=args.sr,
@@ -362,8 +371,9 @@ def _enroll(args: argparse.Namespace) -> int:
     )
     save_enrollment_pt(
         speaker_id=args.speaker_id,
-        embedding=embedding,
+        embedding=np.asarray(profile["embedding"], dtype=np.float32),
         store_path=store_path,
+        sub_prototypes=np.asarray(profile["sub_prototypes"], dtype=np.float32),
         verbose=args.verbose,
     )
 

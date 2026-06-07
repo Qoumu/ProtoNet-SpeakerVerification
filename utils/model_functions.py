@@ -6,6 +6,19 @@ import torch
 from utils.data_preprocessing import audio_to_mel_spectrogram
 from model.ECAPATDNN import ECAPATDNNBackbone
 
+
+def _infer_backbone_config(state: dict[str, torch.Tensor]) -> tuple[int, int, int]:
+    """Infer n_mels, channels, and embedding dim from a checkpoint state_dict."""
+    try:
+        emb_dim = int(state["fc.1.weight"].shape[0])
+        channels = int(state["layer1.bn.weight"].shape[0])
+        n_mels = int(state["layer1.conv.weight"].shape[1])
+    except KeyError as exc:
+        raise ValueError(
+            "Checkpoint does not contain the expected ECAPA-TDNN backbone keys."
+        ) from exc
+    return n_mels, channels, emb_dim
+
 def _pad_or_crop_mel(
     mel: np.ndarray,
     *,
@@ -57,11 +70,23 @@ def preprocess_audio(
 def load_model(
     model_path: Path,
     *,
-    device: torch.device, n_mels: int = 80, channels: int = 512, emb_dim: int = 64,
+    device: torch.device,
+    n_mels: int | None = 80,
+    channels: int | None = 512,
+    emb_dim: int | None = 64,
 ) -> ECAPATDNNBackbone:
     """Instantiate backbone and load weights."""
-    model = ECAPATDNNBackbone(n_mels=n_mels, channels=channels, emb_dim=emb_dim)
     state = torch.load(model_path, map_location=device)
+    inferred_n_mels, inferred_channels, inferred_emb_dim = _infer_backbone_config(state)
+
+    if n_mels is None or n_mels != inferred_n_mels:
+        n_mels = inferred_n_mels
+    if channels is None or channels != inferred_channels:
+        channels = inferred_channels
+    if emb_dim is None or emb_dim != inferred_emb_dim:
+        emb_dim = inferred_emb_dim
+
+    model = ECAPATDNNBackbone(n_mels=n_mels, channels=channels, emb_dim=emb_dim)
     model.load_state_dict(state)
     model.to(device)
     model.eval()

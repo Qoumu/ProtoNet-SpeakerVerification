@@ -833,6 +833,7 @@ def train_prototypical_network(
     # Training loop
     best_val_loss = float('inf')
     history = {
+        "episodes": [],
         "train_loss": [],
         "train_acc": [],
         "val_loss": [],
@@ -898,6 +899,7 @@ def train_prototypical_network(
                     print(f"  Train Loss: {avg_train_loss:.4f}, Train Acc: {avg_train_acc:.2f}%")
                     print(f"  Val Loss: {avg_val_loss:.4f}, Val Acc: {avg_val_acc:.2f}%")
 
+                    history["episodes"].append(episode + 1)
                     history["train_loss"].append(avg_train_loss)
                     history["train_acc"].append(avg_train_acc)
                     history["val_loss"].append(avg_val_loss)
@@ -919,7 +921,6 @@ def train_prototypical_network(
 
     if plot_path and len(history["train_loss"]) > 0:
         _plot_training_curves(history, plot_path)
-        print(f"Saved training curves to: {plot_path}")
 
     evaluate_test_episodes(
         model=model,
@@ -941,13 +942,15 @@ def train_prototypical_network(
 
 def _plot_training_curves(history: dict, output_path: str | Path) -> None:
     """Plot training curves"""
-    checkpoints = range(10, len(history["train_loss"]) * 10 + 1, 10)
+    episodes = history.get("episodes")
+    if not episodes:
+        episodes = list(range(1, len(history["train_loss"]) + 1))
 
     plt.figure(figsize=(12, 5))
 
     plt.subplot(1, 2, 1)
-    plt.plot(checkpoints, history["train_loss"], label="Train Loss", marker='o')
-    plt.plot(checkpoints, history["val_loss"], label="Val Loss", marker='s')
+    plt.plot(episodes, history["train_loss"], label="Train Loss", marker='o')
+    plt.plot(episodes, history["val_loss"], label="Val Loss", marker='s')
     plt.xlabel("Episode")
     plt.ylabel("Loss")
     plt.title("Loss over Episodes")
@@ -955,8 +958,8 @@ def _plot_training_curves(history: dict, output_path: str | Path) -> None:
     plt.grid(True, alpha=0.3)
 
     plt.subplot(1, 2, 2)
-    plt.plot(checkpoints, history["train_acc"], label="Train Acc", marker='o')
-    plt.plot(checkpoints, history["val_acc"], label="Val Acc", marker='s')
+    plt.plot(episodes, history["train_acc"], label="Train Acc", marker='o')
+    plt.plot(episodes, history["val_acc"], label="Val Acc", marker='s')
     plt.xlabel("Episode")
     plt.ylabel("Accuracy (%)")
     plt.title("Accuracy over Episodes")

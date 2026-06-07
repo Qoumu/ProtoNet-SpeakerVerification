@@ -11,13 +11,13 @@ from utils.paths import get_default_librispeech_root, get_project_root
 
 N_WAY = 10
 K_SHOT = 5
-N_QUERY = 20
+N_QUERY = 15
 N_VAL_EPISODES = 2
 N_TEST_EPISODES = None
 PROJECT_ROOT = get_project_root()
-MODEL_PATH = PROJECT_ROOT / "output" / "ECAPATDNN_protonet_model.pth"
-PLOT_PATH = PROJECT_ROOT / "output" / "ECAPATDNN_protonet_curves.png"
-DET_CURVE_PATH = PROJECT_ROOT / "output" / "ECAPATDNN_protonet_det_curve.png"
+MODEL_PATH = PROJECT_ROOT / "output" / "ECAPATDNN_protonet_model_v2.pth"
+PLOT_PATH = PROJECT_ROOT / "output" / "ECAPATDNN_protonet_curves_v2.png"
+DET_CURVE_PATH = PROJECT_ROOT / "output" / "ECAPATDNN_protonet_det_curve_v2.png"
 DATASET_ROOT = get_default_librispeech_root()
 
 TRAIN_MODE = True
@@ -29,18 +29,18 @@ MIN_SAMPLES_PER_SPEAKER = 15
 MAX_SAMPLES_PER_SPEAKER = None
 N_EPISODES = 500
 TRAIN_AUGMENT = True
-EVAL_SEED = 67
+EVAL_SEED = 36
 VAD_ENABLED = True
-VAD_TOP_DB = 30.0
+VAD_TOP_DB = 10.0
 VAD_FRAME_LENGTH = 2048
-VAD_HOP_LENGTH = 512
-TRAINING_LOSS_MODE = "aam_softmax"
+VAD_HOP_LENGTH = 258
+TRAINING_LOSS_MODE = "hybrid"  # Options: "angular_proto", "aam_softmax", "hybrid"
 PROTO_SCALE = 30.0
 PROTO_MARGIN = 0.2
 AAM_SCALE = 30.0
-AAM_MARGIN = 0.2
-HYBRID_PROTO_WEIGHT = 1.0
-HYBRID_AAM_WEIGHT = 1.0
+AAM_MARGIN = 0.15
+HYBRID_PROTO_WEIGHT = 0.4
+HYBRID_AAM_WEIGHT = 0.6
 
 
 def main() -> None:
