@@ -12,16 +12,7 @@ PROJECT_ROOT = get_project_root()
 
 
 def _default_dataset_root() -> Path:
-    audio_data_root = PROJECT_ROOT / "audio_data"
-    if audio_data_root.exists():
-        return audio_data_root
-
-    librispeech_root = get_default_librispeech_root()
-    train_clean_root = librispeech_root / "train-clean-100"
-    if train_clean_root.exists():
-        return train_clean_root
-
-    return audio_data_root
+    return get_default_librispeech_root() / "train-clean-100"
 
 
 def _detect_audio_ext(dataset_root: Path) -> str:
@@ -33,97 +24,64 @@ def _detect_audio_ext(dataset_root: Path) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Fine-tune the prototypical ECAPA-TDNN model from an existing checkpoint.",
+        description="Train an x-vector backbone with prototypical-network episodes.",
     )
-    parser.add_argument(
-        "--checkpoint",
-        type=Path,
-        required=True,
-        help="Path to the existing checkpoint used to initialize fine-tuning.",
-    )
-    parser.add_argument(
-        "--dataset-root",
-        type=Path,
-        default=_default_dataset_root(),
-        help="Root directory containing speaker audio files.",
-    )
-    parser.add_argument(
-        "--ext",
-        type=str,
-        default=None,
-        help="Audio file extension to scan, for example .wav or .flac. Default: auto-detect.",
-    )
-    parser.add_argument("--num-speakers", type=int, default=10)
-    parser.add_argument("--train-ratio", type=float, default=0.8)
+    parser.add_argument("--dataset-root", type=Path, default=_default_dataset_root())
+    parser.add_argument("--ext", type=str, default=None)
+    parser.add_argument("--num-speakers", type=int, default=250)
+    parser.add_argument("--train-ratio", type=float, default=0.6)
     parser.add_argument("--val-ratio", type=float, default=0.2)
-    parser.add_argument("--test-ratio", type=float, default=0.0)
-    parser.add_argument("--min-samples-per-speaker", type=int, default=15)
+    parser.add_argument("--test-ratio", type=float, default=0.2)
+    parser.add_argument("--min-samples-per-speaker", type=int, default=20)
     parser.add_argument("--max-samples-per-speaker", type=int, default=None)
-    parser.add_argument("--n-way", type=int, default=10)
+    parser.add_argument("--n-way", type=int, default=5)
     parser.add_argument("--k-shot", type=int, default=5)
-    parser.add_argument("--n-query", type=int, default=20)
-    parser.add_argument("--episodes", type=int, default=200)
+    parser.add_argument("--n-query", type=int, default=15)
+    parser.add_argument("--episodes", type=int, default=500)
     parser.add_argument("--val-episodes", type=int, default=2)
-    parser.add_argument("--test-episodes", type=int, default=None)
+    parser.add_argument("--test-episodes", type=int, default=50)
     parser.add_argument("--sr", type=int, default=16000)
     parser.add_argument("--n-mels", type=int, default=80)
     parser.add_argument("--duration", type=float, default=5.0)
     parser.add_argument("--n-fft", type=int, default=512)
     parser.add_argument("--hop-length", type=int, default=256)
+    parser.add_argument("--embedding-dim", type=int, default=192)
+    parser.add_argument("--tdnn-channels", type=int, default=512)
+    parser.add_argument("--stats-channels", type=int, default=1500)
+    parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument(
-        "--proto-scale",
-        type=float,
-        default=30.0,
-        help="Cosine scale used in the prototypical loss.",
+        "--training-loss-mode",
+        choices=("angular_proto", "aam_softmax", "hybrid"),
+        default="hybrid",
     )
-    parser.add_argument(
-        "--proto-margin",
-        type=float,
-        default=0.2,
-        help="Cosine margin applied to target logits in the prototypical loss.",
-    )
-    parser.add_argument(
-        "--augmentation-probability",
-        type=float,
-        default=0.3,
-        help="Probability of applying waveform augmentation during training.",
-    )
+    parser.add_argument("--proto-scale", type=float, default=30.0)
+    parser.add_argument("--proto-margin", type=float, default=0.15)
+    parser.add_argument("--aam-scale", type=float, default=30.0)
+    parser.add_argument("--aam-margin", type=float, default=0.15)
+    parser.add_argument("--hybrid-proto-weight", type=float, default=0.8)
+    parser.add_argument("--hybrid-aam-weight", type=float, default=0.2)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--checkpoint", type=Path, default=None)
+    parser.add_argument("--output-model", type=Path, default=PROJECT_ROOT / "output" / "xvector_protonet_model.pth")
+    parser.add_argument("--plot-path", type=Path, default=PROJECT_ROOT / "output" / "xvector_protonet_curves.png")
+    parser.add_argument("--det-curve-path", type=Path, default=PROJECT_ROOT / "output" / "xvector_protonet_det_curve.png")
+    parser.add_argument("--augmentation-probability", type=float, default=0.2)
     parser.add_argument(
         "--augmentation-rir-dir",
         type=Path,
         default=PROJECT_ROOT / "rirs_noises" / "RIRS_NOISES" / "real_rirs_isotropic_noises",
-        help="Directory containing RIR/noise assets for augmentation.",
     )
-    parser.add_argument(
-        "--output-model",
-        type=Path,
-        default=PROJECT_ROOT / "output" / "ECAPATDNN_protonet_finetuned.pth",
-        help="Path to save the best fine-tuned checkpoint.",
-    )
-    parser.add_argument(
-        "--plot-path",
-        type=Path,
-        default=PROJECT_ROOT / "output" / "ECAPATDNN_protonet_finetuned_curves.png",
-        help="Path to save training curves.",
-    )
-    parser.add_argument(
-        "--det-curve-path",
-        type=Path,
-        default=PROJECT_ROOT / "output" / "ECAPATDNN_protonet_finetuned_det_curve.png",
-        help="Path to save the DET curve.",
-    )
-    parser.add_argument("--eval-seed", type=int, default=67)
+    parser.add_argument("--vad-enabled", dest="vad_enabled", action="store_true")
+    parser.add_argument("--no-vad", dest="vad_enabled", action="store_false")
+    parser.set_defaults(vad_enabled=True)
+    parser.add_argument("--vad-top-db", type=float, default=10.0)
+    parser.add_argument("--vad-frame-length", type=int, default=2048)
+    parser.add_argument("--vad-hop-length", type=int, default=258)
+    parser.add_argument("--eval-seed", type=int, default=36)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--no-train-augment",
-        action="store_true",
-        help="Disable waveform augmentation during fine-tuning.",
-    )
-    parser.add_argument(
-        "--no-progress",
-        action="store_true",
-        help="Disable tqdm progress display.",
-    )
+    parser.add_argument("--no-train-augment", action="store_true")
+    parser.add_argument("--no-progress", action="store_true")
     parser.add_argument(
         "--allow-cpu",
         action="store_true",
@@ -149,16 +107,18 @@ def main() -> None:
         seed=args.seed,
     )
 
-    unique_label_ids = {item["label_id"] for item in dataset_list}
-    print(f"Fine-tune checkpoint: {args.checkpoint}")
     print(f"Dataset root: {dataset_root}")
     print(f"Audio extension: {audio_ext}")
     print(f"Dataset size: {len(dataset_list)}")
-    print(f"Number of speakers: {len(unique_label_ids)}")
 
     train_prototypical_network(
         dataset_list=dataset_list,
         train_mode=True,
+        backbone="xvector",
+        embedding_dim=args.embedding_dim,
+        xvector_tdnn_channels=args.tdnn_channels,
+        xvector_stats_channels=args.stats_channels,
+        xvector_dropout=args.dropout,
         n_way=args.n_way,
         k_shot=args.k_shot,
         n_query=args.n_query,
@@ -170,6 +130,10 @@ def main() -> None:
         duration=args.duration,
         n_fft=args.n_fft,
         hop_length=args.hop_length,
+        vad_enabled=args.vad_enabled,
+        vad_top_db=args.vad_top_db,
+        vad_frame_length=args.vad_frame_length,
+        vad_hop_length=args.vad_hop_length,
         train_augment=not args.no_train_augment,
         augmentation_probability=args.augmentation_probability,
         augmentation_rir_dir=args.augmentation_rir_dir,
@@ -181,8 +145,15 @@ def main() -> None:
             "speed_range": (0.9, 1.1),
         },
         show_progress=not args.no_progress,
+        training_loss_mode=args.training_loss_mode,
         proto_scale=args.proto_scale,
         proto_margin=args.proto_margin,
+        aam_scale=args.aam_scale,
+        aam_margin=args.aam_margin,
+        hybrid_proto_weight=args.hybrid_proto_weight,
+        hybrid_aam_weight=args.hybrid_aam_weight,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
         init_checkpoint_path=args.checkpoint,
         require_cuda=not args.allow_cpu,
         model_path=args.output_model,

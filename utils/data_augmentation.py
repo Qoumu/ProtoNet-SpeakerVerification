@@ -1,12 +1,12 @@
 import random
 import numpy as np
+import soundfile as sf
 import torch
 import torch.nn.functional as F
+import torchaudio.functional as AF
 import os
 
 os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
-
-import librosa
 
 
 class DataAugmentation:
@@ -59,23 +59,11 @@ class DataAugmentation:
         ]
 
     def _resample_waveform(self, waveform, orig_freq, new_freq):
-        """Resample a [C, T] waveform tensor without torchaudio."""
+        """Resample a [C, T] waveform tensor."""
         if orig_freq == new_freq:
             return waveform
 
-        resampled_channels = []
-        waveform_np = waveform.detach().cpu().numpy()
-
-        for channel in waveform_np:
-            resampled_channel = librosa.resample(
-                channel.astype(np.float32),
-                orig_sr=orig_freq,
-                target_sr=new_freq,
-            )
-            resampled_channels.append(resampled_channel.astype(np.float32))
-
-        resampled_np = np.stack(resampled_channels, axis=0)
-        return torch.from_numpy(resampled_np).to(device=waveform.device, dtype=waveform.dtype)
+        return AF.resample(waveform, orig_freq, new_freq)
 
     def _load_wav_files(self, folder):
         if folder is None or not os.path.exists(folder):
@@ -249,7 +237,10 @@ class DataAugmentation:
         """
 
         rir_path = random.choice(self.rir_files)
-        rir_np, sr = librosa.load(rir_path, sr=None, mono=True)
+        rir_np, sr = sf.read(rir_path, dtype="float32", always_2d=False)
+        rir_np = np.asarray(rir_np, dtype=np.float32)
+        if rir_np.ndim > 1:
+            rir_np = rir_np.mean(axis=1)
         rir = torch.from_numpy(rir_np.astype(np.float32)).unsqueeze(0)
 
         if sr != self.sample_rate:

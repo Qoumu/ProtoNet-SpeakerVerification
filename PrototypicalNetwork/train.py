@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,13 +7,37 @@ import numpy as np
 import math
 from pathlib import Path
 from typing import Any, Optional, List
+
+os.environ.setdefault("MPLCONFIGDIR", str(Path("/tmp") / "matplotlib"))
+
 import matplotlib.pyplot as plt
 
 from model.CNN import SpeakerCNN
 from model.ECAPATDNN import ECAPATDNNBackbone
+from model.XVector import XVectorBackbone
 from utils.data_augmentation import DataAugmentation
 from utils.data_preprocessing import SpeakerDataset
 from utils.general import *
+
+
+def _select_training_device(*, require_cuda: bool = True) -> torch.device:
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        torch.backends.cudnn.benchmark = True
+        print(f"Using device: {device} ({torch.cuda.get_device_name(device)})")
+        return device
+
+    if require_cuda:
+        raise RuntimeError(
+            "CUDA is not available, so training would run on CPU. "
+            "Install a CUDA-enabled PyTorch build, check your NVIDIA driver, "
+            "or rerun with --allow-cpu if CPU training is intentional."
+        )
+
+    device = torch.device("cpu")
+    print(f"Using device: {device} (CUDA unavailable; CPU fallback allowed)")
+    return device
+
 
 class AngularPrototypicalLoss(nn.Module):
     """Angular prototypical loss over episodic class prototypes."""
@@ -275,8 +300,11 @@ def _forward_episode(model, support_data, query_data, dataset, device, n_way):
         device=device,
     )
 
-    support_embeddings = model(support_mels)
-    query_embeddings = model(query_mels)
+    episode_mels = torch.cat([support_mels, query_mels], dim=0)
+    episode_embeddings = model(episode_mels)
+    support_count = support_mels.size(0)
+    support_embeddings = episode_embeddings[:support_count]
+    query_embeddings = episode_embeddings[support_count:]
     prototypes = compute_prototypes(support_embeddings, support_labels, n_way)
     prototype_scores = model.pn_predict(query_embeddings, prototypes)
 
@@ -377,28 +405,17 @@ def _plot_det_curve(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    min_prob = 1e-4
-    max_prob = 1.0 - min_prob
-
-    far = np.clip(far, min_prob, max_prob)
-    fnr = np.clip(fnr, min_prob, max_prob)
-
-    normal = torch.distributions.Normal(0.0, 1.0)
-    far_det = normal.icdf(torch.tensor(far, dtype=torch.float32)).cpu().numpy()
-    fnr_det = normal.icdf(torch.tensor(fnr, dtype=torch.float32)).cpu().numpy()
-    eer_far_det = float(normal.icdf(torch.tensor(np.clip(eer_far, min_prob, max_prob), dtype=torch.float32)).item())
-    eer_fnr_det = float(normal.icdf(torch.tensor(np.clip(eer_fnr, min_prob, max_prob), dtype=torch.float32)).item())
-
-    tick_probs = np.array([0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 40], dtype=np.float32) / 100.0
-    tick_positions = normal.icdf(torch.tensor(tick_probs)).cpu().numpy()
-    tick_labels = [f"{prob * 100:g}" for prob in tick_probs]
+    far_percent = far * 100.0
+    fnr_percent = fnr * 100.0
+    eer_far_percent = eer_far * 100.0
+    eer_fnr_percent = eer_fnr * 100.0
 
     plt.figure(figsize=(7, 7))
-    plt.plot(far_det, fnr_det, linewidth=2, label="DET")
-    plt.scatter([eer_far_det], [eer_fnr_det], color="red", s=35, label=f"EER {eer * 100:.2f}%")
+    plt.plot(far_percent, fnr_percent, linewidth=2, label="DET")
+    plt.scatter([eer_far_percent], [eer_fnr_percent], color="red", s=35, label=f"EER {eer * 100:.2f}%")
     plt.annotate(
         f"({eer_far * 100:.2f}%, {eer_fnr * 100:.2f}%)",
-        xy=(eer_far_det, eer_fnr_det),
+        xy=(eer_far_percent, eer_fnr_percent),
         xytext=(8, -12),
         textcoords="offset points",
         color="red",
@@ -407,8 +424,6 @@ def _plot_det_curve(
     plt.xlabel("False Alarm Rate (%)")
     plt.ylabel("Miss Rate (%)")
     plt.title("Detection Error Tradeoff Curve")
-    plt.xticks(tick_positions, tick_labels)
-    plt.yticks(tick_positions, tick_labels)
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
@@ -659,21 +674,29 @@ def train_prototypical_network(
     augmentation_kwargs: Optional[dict] = None,
     show_progress: bool = True,
     training_loss_mode: str = "aam_softmax",
+    backbone: str = "ecapa",
+    embedding_dim: int = 192,
+    ecapa_channels: int = 512,
+    xvector_tdnn_channels: int = 512,
+    xvector_stats_channels: int = 1500,
+    xvector_dropout: float = 0.1,
     proto_scale: float = 30.0,
     proto_margin: float = 0.2,
     aam_scale: float = 30.0,
     aam_margin: float = 0.2,
     hybrid_proto_weight: float = 1.0,
     hybrid_aam_weight: float = 1.0,
+    lr: float = 0.0001,
+    weight_decay: float = 0.01,
     init_checkpoint_path: Optional[str | Path] = None,
+    require_cuda: bool = True,
     model_path: str | Path = "output/ECAPATDNN_protonet_model.pth",
     eval_seed: Optional[int] = None,
     plot_path: Optional[str | Path] = "ECAPATDNN_protonet_training_curves.png",
     det_curve_path: Optional[str | Path] = "output/ECAPATDNN_protonet_det_curve.png",
 ):
     # Device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    device = _select_training_device(require_cuda=require_cuda)
 
     # Split data
     train_data = [item for item in dataset_list if item['split'] == 'train']
@@ -693,6 +716,8 @@ def train_prototypical_network(
     print(f"  Angular proto margin: {proto_margin}")
     print(f"  AAM scale: {aam_scale}")
     print(f"  AAM margin: {aam_margin}")
+    print(f"  Backbone: {backbone}")
+    print(f"  Embedding dim: {embedding_dim}")
     print(f"  VAD enabled: {vad_enabled}")
     if vad_enabled:
         print(f"  VAD top_db: {vad_top_db}")
@@ -776,8 +801,19 @@ def train_prototypical_network(
         vad_hop_length=vad_hop_length,
     )
 
-    # Initialize model
-    model = ECAPATDNNBackbone(n_mels=n_mels, channels=512, emb_dim=192)
+    backbone_key = backbone.lower().replace("_", "-")
+    if backbone_key in {"ecapa", "ecapa-tdnn"}:
+        model = ECAPATDNNBackbone(n_mels=n_mels, channels=ecapa_channels, emb_dim=embedding_dim)
+    elif backbone_key in {"xvector", "x-vector"}:
+        model = XVectorBackbone(
+            n_mels=n_mels,
+            tdnn_channels=xvector_tdnn_channels,
+            stats_channels=xvector_stats_channels,
+            emb_dim=embedding_dim,
+            dropout=xvector_dropout,
+        )
+    else:
+        raise ValueError("backbone must be one of: ecapa, ecapa-tdnn, xvector, x-vector")
     model = model.to(device)
 
     if init_checkpoint_path is not None:
@@ -811,7 +847,7 @@ def train_prototypical_network(
         train_speaker_ids = sorted({item["label_id"] for item in train_data})
         train_classifier_map = {label_id: idx for idx, label_id in enumerate(train_speaker_ids)}
         aam_loss_fn = AAMSoftmaxLoss(
-            embedding_dim=192,
+            embedding_dim=embedding_dim,
             num_classes=len(train_speaker_ids),
             scale=aam_scale,
             margin=aam_margin,
@@ -820,7 +856,7 @@ def train_prototypical_network(
     elif training_loss_mode != "angular_proto":
         raise ValueError("training_loss_mode must be one of: angular_proto, aam_softmax, hybrid")
 
-    optimizer = optim.AdamW(optimizer_params, lr=0.0001, weight_decay=0.01)
+    optimizer = optim.AdamW(optimizer_params, lr=lr, weight_decay=weight_decay)
 
     # Learning rate scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -831,7 +867,7 @@ def train_prototypical_network(
     model_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Training loop
-    best_val_loss = float('inf')
+    best_train_loss = float('inf')
     history = {
         "episodes": [],
         "train_loss": [],
@@ -906,16 +942,16 @@ def train_prototypical_network(
                     history["val_acc"].append(avg_val_acc)
 
                     # Save best model
-                    if avg_val_loss < best_val_loss:
-                        best_val_loss = avg_val_loss
+                    if avg_train_loss < best_train_loss and avg_val_loss <= 0.5:
+                        best_train_loss = avg_train_loss
                         torch.save(model.state_dict(), model_path)
-                        print(f"  ✓ Saved best model (Val Loss: {avg_val_loss:.4f})")
+                        print(f"  ✓ Saved best model (Train Loss: {avg_train_loss:.4f})")
 
             except ValueError as e:
                 # Skip episodes where we can't sample enough data
                 continue
 
-        print(f"\nTraining completed! Best validation loss: {best_val_loss:.4f}")
+        print(f"\nTraining completed! Best training loss: {best_train_loss:.4f}")
     else:
         print(f"\nSkipping training. Evaluating checkpoint from: {model_path}")
 

@@ -4,9 +4,11 @@ import numpy as np
 os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
 
 import librosa
+import soundfile as sf
 import torch
 import torch.nn.functional as F
 import torchaudio
+import torchaudio.functional as AF
 from pathlib import Path
 from torch.utils.data import Dataset
 from typing import Callable, List, Optional, Tuple
@@ -95,17 +97,28 @@ def load_audio_waveform(
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    y, sr_loaded = librosa.load(
+    info = sf.info(str(audio_path))
+    start = max(0, int(round(offset * info.samplerate)))
+    frames = -1 if duration is None else max(0, int(round(duration * info.samplerate)))
+    y, sr_loaded = sf.read(
         str(audio_path),
-        sr=sr,
-        mono=True,
-        offset=offset,
-        duration=duration,
+        dtype="float32",
+        always_2d=False,
+        start=start,
+        frames=frames,
     )
+    y = np.asarray(y, dtype=np.float32)
+    if y.ndim > 1:
+        y = y.mean(axis=1)
     if y.size == 0:
         raise ValueError("Loaded audio is empty. Check offset/duration and file content.")
 
-    return y.astype(np.float32), sr_loaded
+    if sr_loaded != sr:
+        waveform = torch.from_numpy(y).float().unsqueeze(0)
+        y = AF.resample(waveform, sr_loaded, sr).squeeze(0).numpy()
+        sr_loaded = sr
+
+    return y.astype(np.float32, copy=False), sr_loaded
 
 def audio_to_mel_spectrogram(
     audio_path: str | Path | None = None,
