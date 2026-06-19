@@ -1,0 +1,2 @@
+-r requirements.txt
+# Add onnxruntime>=1.18,<2 only when APP_MODEL_PATH points to an ONNX model.

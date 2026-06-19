@@ -1,0 +1,3 @@
+[console_scripts]
+speaker-app = speaker_app.main:main
+speaker-password-hash = speaker_app.password_hash:main

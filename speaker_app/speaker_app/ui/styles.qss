@@ -1,0 +1,57 @@
+QWidget {
+    background: #111827;
+    color: #f9fafb;
+    font-size: 19px;
+}
+QWidget > * {
+    margin: 5px;
+}
+QLabel#pageTitle {
+    font-size: 30px;
+    font-weight: bold;
+    color: #f9fafb;
+}
+QLabel#largeStatus, QLabel#resultIdentity {
+    font-size: 28px;
+    font-weight: bold;
+    color: #60a5fa;
+}
+QLabel#errorLabel {
+    color: #fca5a5;
+}
+QPushButton {
+    border: 2px solid #64748b;
+    border-radius: 10px;
+    background: #1f2937;
+    padding: 10px 18px;
+}
+QPushButton#primaryButton {
+    background: #2563eb;
+    border-color: #60a5fa;
+    font-weight: bold;
+}
+QPushButton#dangerButton {
+    background: #991b1b;
+    border-color: #f87171;
+    font-weight: bold;
+}
+QPushButton:disabled {
+    color: #94a3b8;
+    background: #334155;
+}
+QLineEdit {
+    min-height: 46px;
+    border: 2px solid #64748b;
+    border-radius: 8px;
+    background: #1f2937;
+    padding: 4px 10px;
+}
+QProgressBar {
+    min-height: 30px;
+    border: 1px solid #64748b;
+    border-radius: 6px;
+    text-align: center;
+}
+QProgressBar::chunk {
+    background: #2563eb;
+}

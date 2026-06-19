@@ -2,9 +2,23 @@
 
 ## 1. Project Overview
 
-Build a touchscreen-friendly speaker recognition application for Raspberry Pi.
+Build a touchscreen-friendly speaker recognition application with a Python backend and a PySide6/Qt Widgets GUI.
 
-The system has two main functions:
+Development and deployment must occur in two distinct stages:
+
+1. **Local development and testing on the developer's laptop**
+   - Run the application directly in a local Python virtual environment.
+   - Use a normal resizable application window by default.
+   - Test GUI navigation, microphone recording, enrollment, recognition, database persistence, error handling, and model inference locally.
+   - Use mocks or test audio files when microphone hardware is unavailable.
+
+2. **Dockerized deployment on Raspberry Pi**
+   - Containerize the verified application only after local native testing succeeds.
+   - Run the container on Raspberry Pi OS Lite with Openbox/X11.
+   - Connect the container to the Raspberry Pi display, microphone, persistent data directories, and model files.
+   - Run the GUI full-screen on the Raspberry Pi touchscreen or attached display.
+
+The system has two main user functions:
 
 1. **Enroll Speaker**
    - Ask the user for a speaker ID and optional display name.
@@ -22,36 +36,95 @@ The system has two main functions:
    - Display the recognized speaker ID.
    - Display `Unknown Speaker` when no stored speaker passes the recognition threshold.
 
-The current project has those two feature, read all the current project structure and utilize it
 ---
 
-## 2. Target Platform
+## 2. Development and Deployment Targets
+
+### 2.1 Stage 1 — Local Laptop Development
+
+The first implementation must be developed, run, and tested directly on the developer's laptop without Docker.
+
+- Runtime: Native Python virtual environment
+- Backend language: Python
+- GUI framework: PySide6 using Qt Widgets
+- Display mode: Normal resizable window during development
+- Database: Local SQLite file
+- Audio input: Laptop microphone or attached USB microphone
+- Model execution: Local CPU or available laptop accelerator
+- Configuration profile: `development`
+- Launch command:
+
+```bash
+python -m speaker_app.main --profile development --windowed
+```
+
+The local application must support:
+
+- GUI-only testing with dummy services
+- Test WAV files instead of live recording
+- Live microphone testing
+- Temporary local database paths
+- Debug logging
+- Unit and integration tests
+
+The agent must not require Docker to run the first working version.
+
+### 2.2 Stage 2 — Dockerized Raspberry Pi Deployment
+
+After local testing passes, package the application into a Docker image for Raspberry Pi.
 
 - Device: Raspberry Pi
 - Operating system: Raspberry Pi OS Lite / CLI-only environment
-- Desktop environment: No full desktop environment
-- Window manager: Openbox
+- Host window manager: Openbox
+- Host display server: X11
+- Container runtime: Docker Engine with Docker Compose
 - Display mode: Full-screen application
-- Backend language: Python
-- GUI framework: PySide6 using Qt Widgets
-- Database: SQLite
-- Audio input: USB microphone or Raspberry Pi-compatible microphone
-- Execution environment: X11 started through `startx` and Openbox
+- Audio input: Raspberry Pi-compatible USB microphone
+- Database: SQLite stored on a persistent host-mounted volume
+- Configuration profile: `raspberry-pi`
+- Container architecture: Must match the Raspberry Pi architecture, normally ARM64 on a 64-bit OS
 
-Expected application launch:
+The Docker container must integrate with host resources rather than attempting to run a full desktop environment inside the container.
 
-```bash
-startx /path/to/start-speaker-app.sh
+Required host integrations may include:
+
+- X11 display socket
+- Xauthority credentials
+- ALSA audio devices such as `/dev/snd`
+- Persistent application data directory
+- Persistent log directory
+- Read-only model directory when appropriate
+
+Expected host-side launch flow:
+
+```text
+Raspberry Pi boots
+→ X11 and Openbox start
+→ Docker Compose starts the application container
+→ Qt connects to the host X11 display
+→ The application opens full-screen
 ```
 
-Example launch script:
+Example deployment command:
 
 ```bash
-#!/bin/bash
-
-openbox-session &
-exec /path/to/venv/bin/python /path/to/speaker_app/main.py
+docker compose --profile raspberry-pi up -d
 ```
+
+### 2.3 Environment Differences
+
+The application must not assume that the laptop and Raspberry Pi use the same:
+
+- Operating system
+- CPU architecture
+- Microphone name or device index
+- Display resolution
+- File paths
+- User ID or group ID
+- Audio device permissions
+- Model runtime or acceleration provider
+
+All platform-specific values must come from configuration or environment variables.
 
 ---
 
@@ -72,6 +145,12 @@ The application must follow these principles:
 - Handle microphone, recording, model, database, and audio-quality errors explicitly.
 - Use structured return values instead of relying on terminal `print()` output.
 - Store the embedding model version with each enrolled speaker.
+- Keep local-native execution working independently of Docker.
+- Use environment-specific configuration profiles for laptop and Raspberry Pi.
+- Do not hardcode microphone indices, display identifiers, absolute host paths, user IDs, or group IDs.
+- Isolate host hardware access behind service interfaces so it can be mocked during local tests.
+- Keep application data outside the container filesystem through persistent volumes.
+- Do not use Docker `--privileged` unless a documented hardware requirement makes it unavoidable.
 
 ---
 
@@ -106,58 +185,92 @@ The application must follow these principles:
 ## 5. Recommended Project Structure
 
 ```text
-app/
-├── main.py
-├── app_controller.py
-├── config.py
-│
-├── ui/
+speaker_app/
+├── speaker_app/
 │   ├── __init__.py
-│   ├── main_window.py
-│   ├── home_page.py
-│   ├── enroll_info_page.py
-│   ├── enroll_recording_page.py
-│   ├── enroll_processing_page.py
-│   ├── recognition_page.py
-│   ├── recognition_result_page.py
-│   ├── message_dialog.py
-│   └── styles.qss
+│   ├── main.py
+│   ├── app_controller.py
+│   ├── config.py
+│   │
+│   ├── ui/
+│   │   ├── __init__.py
+│   │   ├── main_window.py
+│   │   ├── home_page.py
+│   │   ├── enroll_info_page.py
+│   │   ├── enroll_authorization_page.py
+│   │   ├── enroll_recording_page.py
+│   │   ├── enroll_processing_page.py
+│   │   ├── recognition_page.py
+│   │   ├── recognition_result_page.py
+│   │   ├── message_dialog.py
+│   │   └── styles.qss
+│   │
+│   ├── services/
+│   │   ├── __init__.py
+│   │   ├── audio_service.py
+│   │   ├── enrollment_authorization_service.py
+│   │   ├── enrollment_service.py
+│   │   ├── recognition_service.py
+│   │   └── speaker_repository.py
+│   │
+│   ├── model/
+│   │   ├── __init__.py
+│   │   ├── embedding_extractor.py
+│   │   └── model_loader.py
+│   │
+│   ├── workers/
+│   │   ├── __init__.py
+│   │   └── backend_worker.py
+│   │
+│   └── domain/
+│       ├── __init__.py
+│       └── results.py
 │
-├── services/
-│   ├── __init__.py
-│   ├── audio_service.py
-│   ├── enrollment_service.py
-│   ├── recognition_service.py
-│   └── speaker_repository.py
-│
-├── model/
-│   ├── __init__.py
-│   └── model.pth
-│
-├── workers/
-│   ├── __init__.py
-│   └── backend_worker.py
-│
-├── domain/
-│   ├── __init__.py
-│   └── results.py
+├── config/
+│   ├── development.env.example
+│   └── raspberry-pi.env.example
 │
 ├── data/
-│   ├── enrolled_speakers.pt
+│   ├── speakers.db
 │   ├── temporary_audio/
 │   └── enrollment_audio/
 │
+├── models/
+├── logs/
+│
 ├── scripts/
-│   └── start-speaker-app.sh
+│   ├── run-local.sh
+│   ├── run-local.ps1
+│   └── start-openbox-app.sh
 │
 ├── tests/
-│   ├── test_repository.py
-│   ├── test_embedding_comparison.py
-│   └── test_services.py
+│   ├── unit/
+│   │   ├── test_repository.py
+│   │   ├── test_authorization.py
+│   │   └── test_embedding_comparison.py
+│   ├── integration/
+│   │   ├── test_enrollment_flow.py
+│   │   └── test_recognition_flow.py
+│   └── fixtures/
+│       └── audio/
 │
+├── Dockerfile
+├── compose.yaml
+├── .dockerignore
+├── .gitignore
+├── pyproject.toml
 ├── requirements.txt
+├── requirements-rpi.txt
 └── README.md
 ```
+
+Rules:
+
+- The Python package must run locally without Docker.
+- `Dockerfile` and `compose.yaml` are deployment layers around the same application package.
+- Do not create separate, diverging laptop and Raspberry Pi codebases.
+- Environment files must not contain committed secrets.
+- The SQLite database, recordings, logs, and downloaded model assets must not be baked into the Docker image.
 
 ---
 
@@ -199,7 +312,7 @@ Inputs:
 
 Buttons:
 
-- `Start Enrollment`
+- `Continue`
 - `Back`
 
 Validation rules:
@@ -215,80 +328,42 @@ Recommended allowed format:
 [A-Za-z0-9_-]
 ```
 
+After the information passes validation, navigate to the **Enrollment Authorization Page**. Do not begin recording yet.
+
 ### 6.3 Enrollment Authorization Page
 
-Before the user can proceed with speaker enrollment, the application must require an authorization password.
+Before recording begins, require an enrollment authorization password.
 
 Display:
 
-- Password input field
+- Speaker ID being enrolled
+- Masked password input field
 - Optional password visibility toggle
-- Short instruction such as `Enter the enrollment password to continue`
+- Instruction: `Enter the enrollment password to continue`
 
 Buttons:
 
 - `Confirm`
 - `Back`
 
-Example:
-
-```text
-┌────────────────────────────────────────┐
-│       ENROLLMENT AUTHORIZATION         │
-│                                        │
-│  Speaker ID: USER_001                  │
-│                                        │
-│  Password: [ •••••••••••••••• ]       │
-│                                        │
-│          [      CONFIRM      ]         │
-│                                        │
-│          [        BACK       ]         │
-└────────────────────────────────────────┘
-```
-
 Required behavior:
 
-- The password field must use masked input.
-- Pressing `Confirm` must validate the password before opening the recording page.
 - A correct password navigates to the Enrollment Recording Page.
-- An incorrect password keeps the user on the authorization page and displays a short error message.
+- An incorrect password keeps the user on the page and displays a short error.
 - Clear the password field after every failed attempt.
-- Do not print, log, or persist the plaintext password.
-- Navigating back returns to the Enrollment Information Page without losing the entered speaker information.
-- Cancelling enrollment clears the password and all pending enrollment data.
-- The password authorizes access to enrollment only. It must not be stored with a speaker profile.
+- Preserve the entered speaker information when navigating back.
+- Clear the password and all pending enrollment state when enrollment is cancelled.
+- Never print, log, persist, or include the plaintext password in an exception.
+- Limit repeated failed attempts according to configuration.
+- The password authorizes access to enrollment only and must not be associated with a speaker profile.
 
 Security requirements:
 
-- Never store the password as plaintext in source code, SQLite, logs, or configuration committed to version control.
-- Store only a secure password hash using Argon2id, scrypt, or bcrypt.
-- Verify the password in a dedicated authorization service.
-- Use a configurable maximum number of failed attempts.
-- After repeated failed attempts, temporarily disable confirmation or return to the Home Page.
-- Use the password library's secure verification function rather than manually comparing hashes.
-
-Recommended interface:
-
-```python
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True)
-class AuthorizationResult:
-    accepted: bool
-    remaining_attempts: int
-    message: str
-
-
-class EnrollmentAuthorizationService:
-    def verify_password(
-        self,
-        password: str,
-    ) -> AuthorizationResult:
-        ...
-```
-
-The GUI must pass the password to this service, process the result, and discard the plaintext value immediately after verification.
+- Never hardcode a plaintext password in source code.
+- Store only a secure password hash outside version control.
+- Use a password-hashing algorithm such as Argon2id, scrypt, or bcrypt.
+- Verify passwords through a dedicated authorization service.
+- Load the hash from a secret environment variable, Docker secret, or protected host file.
 
 ### 6.4 Enrollment Recording Page
 
@@ -400,14 +475,14 @@ HOME
 
 The controller must manage these states and prevent invalid transitions.
 
-Example:
+Examples:
 
-- The user cannot access the Enrollment Recording Page until the enrollment password is accepted.
+- The user cannot enter `ENROLL_RECORDING` until authorization succeeds.
 - The user cannot process enrollment before all required clips are accepted.
 - The user cannot start recognition while enrollment is running.
 - The user cannot navigate away during a database write unless cancellation is safely supported.
-- Returning from authorization to speaker information must preserve the pending speaker ID and display name.
-- Cancelling enrollment must clear all pending information, temporary password data, and temporary recordings.
+- Going back from authorization preserves the pending speaker ID and display name.
+- Cancelling enrollment clears pending information, password data, and temporary recordings.
 
 ---
 
@@ -467,8 +542,6 @@ class RecognitionResult:
 
 ### 8.2 Enrollment Authorization Service
 
-Required interface:
-
 ```python
 class EnrollmentAuthorizationService:
     def verify_password(
@@ -480,19 +553,14 @@ class EnrollmentAuthorizationService:
 
 Responsibilities:
 
-- Validate the enrollment password before recording begins.
-- Verify the password against a securely stored password hash.
+- Verify the entered password against a securely stored hash.
 - Track failed attempts for the current authorization session.
-- Return the number of remaining attempts.
 - Reset failed-attempt state after successful authorization.
-- Never return, log, or expose the stored password hash.
-- Never save the entered plaintext password.
-
-The authorization service must remain independent of speaker enrollment data. The password must not be stored in the `speakers` table.
+- Return a user-safe result without exposing the stored hash.
+- Never save the plaintext password.
+- Work in both local and container environments through injected configuration.
 
 ### 8.3 Audio Service
-
-Required interface:
 
 ```python
 from pathlib import Path
@@ -515,7 +583,7 @@ class AudioService:
 
 Responsibilities:
 
-- Open and validate the microphone.
+- Open and validate the configured microphone.
 - Record PCM audio.
 - Save audio as WAV.
 - Check minimum duration.
@@ -523,10 +591,9 @@ Responsibilities:
 - Detect silence or extremely low energy.
 - Detect clipping where practical.
 - Return structured errors.
+- Support a mock or file-backed implementation for automated local tests.
 
 ### 8.4 Embedding Extractor
-
-Required interface:
 
 ```python
 from pathlib import Path
@@ -553,10 +620,9 @@ Requirements:
 - Return a one-dimensional `float32` NumPy array.
 - Apply L2 normalization before returning, or clearly document where normalization occurs.
 - Raise meaningful exceptions for unreadable or invalid audio.
+- Allow the runtime provider to differ between laptop and Raspberry Pi.
 
 ### 8.5 Enrollment Service
-
-Required interface:
 
 ```python
 from pathlib import Path
@@ -582,9 +648,9 @@ Responsibilities:
 6. Save the speaker record.
 7. Return a structured result.
 
-### 8.6 Recognition Service
+Authorization must be completed before this service is called. Do not pass the password into the enrollment service.
 
-Required interface:
+### 8.6 Recognition Service
 
 ```python
 from pathlib import Path
@@ -890,12 +956,17 @@ Requirements:
 
 The application must explicitly handle:
 
-### Hardware Errors
+### Hardware and Platform Errors
 
 - Microphone not detected
 - Microphone is busy
 - Recording device cannot be opened
 - Audio stream stops unexpectedly
+- Configured microphone exists on the laptop but not on Raspberry Pi
+- X11 display is unavailable inside the container
+- Container cannot access `/dev/snd`
+- Persistent data volume is not writable
+- Model package is incompatible with the target CPU architecture
 
 ### Recording Errors
 
@@ -912,7 +983,7 @@ The application must explicitly handle:
 - Incorrect password
 - Maximum failed attempts reached
 - Password hash is missing or invalid
-- Password verification service fails
+- Authorization service fails
 - Authorization expires before recording begins
 
 ### Enrollment Errors
@@ -942,7 +1013,7 @@ Show messages such as:
 
 ```text
 Microphone unavailable.
-Please check the USB microphone and try again.
+Please check the selected microphone and try again.
 ```
 
 Write technical details to logs.
@@ -961,11 +1032,13 @@ Recommended format:
 2026-06-19 09:30:19 | INFO | recognition_service | Best match USER_001, score=0.873
 ```
 
-Recommended log location:
+Recommended logical log location:
 
 ```text
-speaker_app/logs/speaker_app.log
+logs/speaker_app.log
 ```
+
+During Raspberry Pi deployment, mount `logs/` to a persistent host directory so logs survive container replacement.
 
 Do not log raw embedding vectors unless explicitly required for debugging.
 
@@ -975,7 +1048,7 @@ Do not log sensitive audio paths unnecessarily.
 
 ## 15. Configuration
 
-Place adjustable values in `config.py` or a configuration file.
+All adjustable and platform-dependent values must come from typed configuration and environment variables.
 
 Example:
 
@@ -986,24 +1059,57 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class AppConfig:
+    profile: str = "development"
+    windowed: bool = True
     enrollment_clip_count: int = 6
     enrollment_clip_duration_seconds: float = 5.0
     recognition_clip_duration_seconds: float = 5.0
-    recognition_threshold: float = 0.5
+    recognition_threshold: float = 0.75
     enrollment_password_hash_env: str = "ENROLLMENT_PASSWORD_HASH"
     max_enrollment_password_attempts: int = 3
     enrollment_authorization_timeout_seconds: int = 120
     sample_rate: int = 16000
     audio_channels: int = 1
     audio_dtype: str = "int16"
-    database_path: Path = Path("data/enrolled_speakers.pt")
+    audio_device: str | None = None
+    database_path: Path = Path("data/speakers.db")
     temporary_audio_dir: Path = Path("data/temporary_audio")
     enrollment_audio_dir: Path = Path("data/enrollment_audio")
+    model_dir: Path = Path("models")
+    log_dir: Path = Path("logs")
 ```
 
-The recognition threshold above is only an example placeholder and must be replaced with the validated value from model evaluation.
+The recognition threshold is only an example placeholder and must be replaced with a value selected from model evaluation.
 
-`enrollment_password_hash_env` stores the environment-variable name, not the password hash itself. Provision the actual hash outside the source repository.
+The `enrollment_password_hash_env` value is the name of an environment variable, not the hash itself. The actual hash must be provisioned outside the source repository.
+
+### Development Profile
+
+Typical behavior:
+
+```text
+APP_PROFILE=development
+APP_WINDOWED=true
+APP_AUDIO_DEVICE=<local microphone or empty>
+APP_DATA_DIR=./data
+APP_LOG_LEVEL=DEBUG
+```
+
+### Raspberry Pi Profile
+
+Typical behavior:
+
+```text
+APP_PROFILE=raspberry-pi
+APP_WINDOWED=false
+APP_AUDIO_DEVICE=<Raspberry Pi microphone selector>
+APP_DATA_DIR=/app/data
+APP_MODEL_DIR=/app/models
+APP_LOG_LEVEL=INFO
+DISPLAY=:0
+```
+
+Never commit real passwords, hashes, tokens, or machine-specific secrets in `.env` files. Commit only `.env.example` templates.
 
 ---
 
@@ -1034,11 +1140,10 @@ Enrollment recordings may be deleted after successful enrollment unless they are
 
 ## 17. GUI Styling Requirements
 
-The UI is intended for a touchscreen.
+The final Raspberry Pi UI is intended for a touchscreen, while the local development UI must remain convenient on a laptop.
 
-Requirements:
+Shared requirements:
 
-- Full-screen main window
 - Large touch targets
 - Minimum button height around 60–80 pixels
 - Clear status text
@@ -1047,48 +1152,79 @@ Requirements:
 - Avoid nested menus
 - Keep important actions centered
 - Always provide a clear `Back`, `Cancel`, or `Return Home` action
-- Prevent double-clicking from launching duplicate tasks
+- Prevent repeated clicks from launching duplicate tasks
+- Use layouts rather than absolute coordinates
 
-Suggested base window size during PC development:
+Suggested design resolution:
 
 ```text
 800 × 480
 ```
 
-The final application should adapt to the actual display resolution.
+Local development behavior:
 
-Use layouts rather than absolute coordinates.
+- Start in a normal resizable window.
+- Allow developer resizing and debugging.
+- Support `--windowed` explicitly.
+
+Raspberry Pi behavior:
+
+- Start full-screen.
+- Adapt to the actual display resolution.
+- Hide desktop decorations where practical.
+- Do not assume the laptop and Raspberry Pi use the same DPI or font scaling.
 
 ---
 
 ## 18. Application Startup
 
-At startup:
+At application startup:
 
-1. Configure logging.
-2. Create required directories.
-3. Initialize the SQLite database.
-4. Initialize the enrollment authorization service and verify that a password hash is configured.
-5. Detect the microphone.
-6. Load the embedding model once.
-7. Build the main window.
-8. Display hardware and model status.
-9. Enter full-screen mode.
+1. Load the selected configuration profile.
+2. Configure logging.
+3. Create required directories.
+4. Initialize the SQLite database.
+5. Initialize the enrollment authorization service and verify that a password hash is configured.
+6. Detect the configured microphone.
+7. Load the embedding model once.
+8. Build the main window.
+9. Display hardware, authorization, database, and model status.
+10. Choose windowed or full-screen display from configuration.
 
-Example:
+Example entry point:
 
 ```python
+import argparse
 import sys
 from PySide6.QtWidgets import QApplication
 
-from ui.main_window import MainWindow
+from speaker_app.config import load_config
+from speaker_app.ui.main_window import MainWindow
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--profile",
+        choices=("development", "raspberry-pi"),
+        default="development",
+    )
+    parser.add_argument("--windowed", action="store_true")
+    return parser.parse_args()
 
 
 def main() -> int:
-    app = QApplication(sys.argv)
+    args = parse_args()
+    config = load_config(args.profile)
 
-    window = MainWindow()
-    window.showFullScreen()
+    app = QApplication(sys.argv)
+    window = MainWindow(config=config)
+
+    if args.windowed or config.windowed:
+        window.resize(800, 480)
+        window.show()
+    else:
+        window.showFullScreen()
 
     return app.exec()
 
@@ -1097,11 +1233,25 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-During desktop development, support a command-line flag that runs the application in a normal window instead of full-screen mode.
+### Local Launch
+
+```bash
+python -m speaker_app.main --profile development --windowed
+```
+
+### Raspberry Pi Container Launch
+
+The container command should run the same entry point with a different profile:
+
+```bash
+python -m speaker_app.main --profile raspberry-pi
+```
 
 ---
 
-## 19. Existing Backend Integration
+## 19. Development, Dockerization, and Backend Integration
+
+### 19.1 Existing Backend Integration
 
 The current project already has separate Python programs for:
 
@@ -1135,28 +1285,143 @@ Temporary fallback:
 - Require machine-readable JSON output.
 - Parse only JSON, never free-form terminal text.
 
-Example subprocess result:
+### 19.2 Local Native Development Workflow
 
-```json
-{
-  "success": true,
-  "speaker_id": "USER_001",
-  "similarity": 0.873,
-  "message": "Speaker recognized"
-}
+Required order:
+
+```text
+Create virtual environment
+→ Install Python dependencies
+→ Run unit tests
+→ Run GUI with dummy services
+→ Test local microphone recording
+→ Test enrollment
+→ Test recognition
+→ Test database persistence
+→ Fix platform-independent defects
+→ Freeze dependency versions
 ```
+
+Do not begin Raspberry Pi Docker debugging while the same feature is still failing in native local execution.
+
+Local testing must cover:
+
+- Fresh database startup
+- Duplicate speaker IDs
+- Correct and incorrect enrollment passwords
+- Successful and failed recordings
+- Unknown-speaker rejection
+- Application restart with persisted speakers
+- Model loading only once
+- GUI responsiveness during inference
+
+### 19.3 Docker Image Requirements
+
+The Docker image must:
+
+- Use a Linux base image compatible with the Raspberry Pi architecture.
+- Install only required runtime libraries.
+- Copy application source and dependency manifests.
+- Run as a non-root user where practical.
+- Avoid embedding the database, recordings, logs, passwords, or environment-specific configuration.
+- Define a clear application command.
+- Include a health check only when it can test a meaningful process state.
+- Pin major dependency versions for reproducibility.
+
+The image must not require a full desktop environment inside the container. Qt must connect to the host X11 server.
+
+### 19.4 Docker Compose Host Integration
+
+A Raspberry Pi Compose configuration will typically require settings similar to:
+
+```yaml
+services:
+  speaker-app:
+    build:
+      context: .
+    environment:
+      APP_PROFILE: raspberry-pi
+      DISPLAY: ${DISPLAY:-:0}
+      XAUTHORITY: /run/user/host.Xauthority
+    devices:
+      - /dev/snd:/dev/snd
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${XAUTHORITY_FILE}:/run/user/host.Xauthority:ro
+      - ./runtime/data:/app/data
+      - ./runtime/logs:/app/logs
+      - ./models:/app/models:ro
+    restart: unless-stopped
+```
+
+This is a design template, not a guaranteed final Compose file. The actual device paths, Xauthority path, user IDs, group IDs, and permissions must be verified on the Raspberry Pi.
+
+Security and permission rules:
+
+- Prefer Xauthority-based access over globally disabling X11 access control.
+- Do not use `xhost +`.
+- Map only required devices.
+- Do not use `privileged: true` by default.
+- Add only required supplemental groups, such as the host audio group.
+- Keep password hashes outside the image and inject them at runtime.
+
+### 19.5 Persistent Data
+
+The following must survive container replacement:
+
+- SQLite speaker database
+- Enrollment audio when retention is enabled
+- Logs
+- Optional model cache
+- Application configuration that belongs to the deployment
+
+Use bind mounts or named volumes. Treat the container filesystem as disposable.
+
+### 19.6 Architecture and Dependency Compatibility
+
+Before deployment, verify:
+
+- Raspberry Pi OS is 32-bit or 64-bit.
+- Docker image architecture matches the OS and CPU.
+- PySide6 or the chosen Qt Python package is available for the target architecture.
+- Speaker-model runtime supports the Raspberry Pi architecture.
+- Native audio and numerical dependencies have compatible builds.
+- Model inference latency and memory use are acceptable.
+
+Build options:
+
+1. Build the image directly on the Raspberry Pi.
+2. Build an ARM image on the laptop using Docker Buildx.
+3. Publish a multi-architecture image if both laptop-Linux and Raspberry Pi execution are needed.
+
+Regardless of build method, run the final image on the real Raspberry Pi before declaring deployment complete.
 
 ---
 
 ## 20. Functional Acceptance Criteria
 
-### Enrollment
+### Local Development Acceptance
+
+Before Dockerization begins:
+
+- The application starts natively on the laptop.
+- The GUI opens in windowed mode.
+- All pages and state transitions work.
+- Correct authorization allows enrollment.
+- Incorrect authorization blocks enrollment.
+- Recording works with the configured local microphone or a test-audio adapter.
+- Enrollment creates and persists a speaker profile.
+- Recognition returns a speaker ID or `Unknown Speaker`.
+- The interface does not freeze during recording or inference.
+- Unit and integration tests pass.
+
+### Enrollment Acceptance
 
 Enrollment is considered complete when:
 
 - The user enters a valid unique speaker ID.
-- The user enters the correct enrollment authorization password.
-- The system does not allow recording before authorization succeeds.
+- The correct enrollment password is accepted.
+- Recording cannot begin before authorization succeeds.
 - The system records the configured number of accepted clips.
 - Each clip passes audio validation.
 - The model extracts a valid embedding from every accepted clip.
@@ -1164,7 +1429,7 @@ Enrollment is considered complete when:
 - The database stores the speaker profile successfully.
 - The GUI displays enrollment success.
 
-### Recognition
+### Recognition Acceptance
 
 Recognition is considered complete when:
 
@@ -1175,6 +1440,19 @@ Recognition is considered complete when:
 - The best match is selected.
 - The recognition threshold is applied.
 - The GUI displays either the speaker ID or `Unknown Speaker`.
+
+### Raspberry Pi Container Acceptance
+
+Deployment is considered complete when:
+
+- The image runs on the target Raspberry Pi architecture.
+- Qt renders on the host Openbox/X11 display.
+- The container can record from the Raspberry Pi microphone.
+- Database and logs persist after container recreation.
+- The application starts full-screen with the Raspberry Pi profile.
+- Container restart does not erase enrolled speakers.
+- The container runs without unnecessary privileged access.
+- End-to-end enrollment and recognition succeed on the real device.
 
 ### Responsiveness
 
@@ -1187,8 +1465,9 @@ Recognition is considered complete when:
 
 ## 21. Non-Functional Requirements
 
-- The application should start without internet access.
-- The system should work entirely on-device.
+- The application must run natively on the laptop before Dockerization.
+- The application should start without internet access after dependencies and model assets are installed.
+- The deployed system should work entirely on-device.
 - The model should be loaded only once per application session.
 - Database operations should be transactional.
 - Enrollment authorization must use secure password hashing.
@@ -1199,16 +1478,20 @@ Recognition is considered complete when:
 - Public classes and functions should include concise docstrings.
 - Avoid global mutable state.
 - Use dependency injection where practical.
-- Add unit tests for repository operations and embedding comparison.
+- Add unit tests for authorization, repository operations, and embedding comparison.
 - Keep hardware-specific audio logic isolated from GUI code.
+- Keep local and Raspberry Pi configuration separate without duplicating application logic.
+- Docker builds should be reproducible.
+- Persistent data must not depend on the container writable layer.
+- The Raspberry Pi container should run with the minimum required devices and permissions.
 
 ---
 
 ## 22. Initial Implementation Milestones
 
-### Milestone 1 — GUI Prototype
+### Milestone 1 — Native Local GUI Prototype
 
-Create:
+Create and run on the laptop:
 
 - Main window
 - Home page
@@ -1221,25 +1504,27 @@ Create:
 
 Use dummy backend results.
 
-### Milestone 2 — Audio Integration
+### Milestone 2 — Native Local Audio Integration
 
 Connect:
 
-- Microphone detection
+- Local microphone detection
 - WAV recording
+- Test-audio adapter
 - Audio validation
 - Worker-thread execution
 
-### Milestone 3 — Enrollment Integration
+### Milestone 3 — Native Local Enrollment Integration
 
 Connect:
 
+- Password authorization
 - Embedding extraction
 - Multi-clip prototype generation
 - SQLite storage
 - Enrollment status handling
 
-### Milestone 4 — Recognition Integration
+### Milestone 4 — Native Local Recognition Integration
 
 Connect:
 
@@ -1249,17 +1534,33 @@ Connect:
 - Threshold decision
 - Result display
 
-### Milestone 5 — Raspberry Pi Deployment
+At the end of Milestone 4, the complete application must run successfully on the laptop without Docker.
 
-Configure:
+### Milestone 5 — Dockerization
 
-- Python virtual environment
-- Required system packages
-- Openbox
-- X11
-- Full-screen launch
-- Automatic application startup
-- Logging and crash recovery
+Create:
+
+- `Dockerfile`
+- `.dockerignore`
+- `compose.yaml`
+- Raspberry Pi environment template
+- Persistent volume mapping
+- X11 integration
+- Audio-device mapping
+- Non-root runtime configuration where practical
+
+### Milestone 6 — Raspberry Pi Deployment
+
+Verify:
+
+- ARM architecture compatibility
+- Openbox/X11 display access
+- USB microphone access
+- Full-screen startup
+- Persistent database and logs
+- Container restart policy
+- End-to-end enrollment and recognition
+- Startup after Raspberry Pi reboot
 
 ---
 
@@ -1269,32 +1570,42 @@ When modifying this project, the AI agent must:
 
 1. Read this file before making architectural changes.
 2. Preserve separation between GUI and backend logic.
-3. Never run long backend tasks in the Qt main thread.
-4. Avoid replacing working backend algorithms without a clear reason.
-5. Inspect existing code before inventing new interfaces.
-6. Keep public interfaces typed and documented.
-7. Return structured result objects from backend services.
-8. Keep speaker-model loading centralized and reusable.
-9. Preserve model-version and embedding-dimension validation.
-10. Avoid hardcoding paths outside the configuration layer.
-11. Avoid arbitrary recognition thresholds.
-12. Add error handling for every hardware or file operation.
-13. Keep the Raspberry Pi CLI-only deployment environment in mind.
-14. Prefer incremental, testable changes.
-15. Explain any database migration or incompatible change.
-16. Do not expose raw exceptions directly in the GUI.
-17. Do not store, print, or log the plaintext enrollment password.
-18. Do not hardcode the enrollment password or its hash in committed source files.
-19. Do not associate the enrollment password with individual speaker profiles.
-20. Do not allow access to enrollment recording without successful authorization.
-21. Do not delete enrollment audio unless the configured retention policy allows it.
-22. Do not claim recognition accuracy without evaluation evidence.
+3. Implement and test the application natively on the laptop before requiring Docker.
+4. Treat Docker as a deployment layer, not as a separate application implementation.
+5. Never run long backend tasks in the Qt main thread.
+6. Avoid replacing working backend algorithms without a clear reason.
+7. Inspect existing code before inventing new interfaces.
+8. Keep public interfaces typed and documented.
+9. Return structured result objects from backend services.
+10. Keep speaker-model loading centralized and reusable.
+11. Preserve model-version and embedding-dimension validation.
+12. Avoid hardcoding paths outside the configuration layer.
+13. Avoid hardcoding microphone indices, `DISPLAY`, UID, GID, or device paths.
+14. Avoid arbitrary recognition thresholds.
+15. Add error handling for every hardware or file operation.
+16. Keep the Raspberry Pi CLI-only and Docker deployment environment in mind.
+17. Prefer incremental, testable changes.
+18. Explain any database migration or incompatible change.
+19. Do not expose raw exceptions directly in the GUI.
+20. Do not store, print, or log the plaintext enrollment password.
+21. Do not hardcode the enrollment password or password hash in committed source files.
+22. Do not associate the enrollment password with individual speaker profiles.
+23. Do not allow access to enrollment recording without successful authorization.
+24. Do not store persistent data only inside the container writable layer.
+25. Do not use a privileged container unless the need is documented and narrower alternatives fail.
+26. Do not assume that successful laptop microphone access proves Raspberry Pi microphone access.
+27. Do not delete enrollment audio unless the configured retention policy allows it.
+28. Do not claim recognition accuracy without evaluation evidence.
+29. Keep development and Raspberry Pi configuration examples free of real secrets.
+30. Run final hardware-in-the-loop tests on the actual Raspberry Pi.
 
 ---
 
-## 24. Information Still Needed from the Existing Code
+## 24. Information Still Needed from the Existing Code and Environment
 
 Before final backend integration, inspect and document:
+
+### Existing Python Backend
 
 - Recording library currently used
 - Microphone device name or index
@@ -1308,19 +1619,78 @@ Before final backend integration, inspect and document:
 - Current recognition metric
 - Current recognition threshold
 - Current speaker-storage format
-- Current enrollment password provisioning method
+- Current model runtime: CPU, CUDA, ONNX, Torch, TensorFlow, or another provider
+
+### Authorization
+
+- Enrollment password provisioning method
 - Password-hashing library and algorithm
 - Maximum failed authorization attempts
-- Enrollment authorization timeout behavior
-- Whether CUDA, CPU, ONNX, Torch, or TensorFlow is used
+- Authorization timeout behavior
+
+### Laptop Development Environment
+
+- Laptop operating system
+- Python version
+- Local microphone identifier
+- Available inference acceleration
+- Expected model path
+- Whether local Docker Desktop is available for optional image building
+
+### Raspberry Pi Deployment Environment
+
+- Raspberry Pi model
+- Raspberry Pi OS version and architecture
+- Available RAM
+- Display resolution
+- X11 display identifier
+- Xauthority file location
+- Openbox startup method
+- USB microphone ALSA identifier
+- Host audio group ID
+- Docker and Docker Compose versions
+- Whether the image will be built on the Pi or cross-built on the laptop
 - Expected Raspberry Pi inference latency
 - Exact behavior when multiple speakers have similar scores
 
-These values should replace placeholders in this document and in `config.py`.
+These values should replace placeholders in this document, environment templates, and configuration code.
 
 ---
 
-## 25. Final Expected User Flow
+## 25. Final Expected User and Deployment Flow
+
+### Local Development Flow
+
+```text
+Clone project
+→ Create local Python virtual environment
+→ Install dependencies
+→ Configure development profile
+→ Run unit tests
+→ Launch windowed GUI
+→ Test microphone and test-audio modes
+→ Test authorization
+→ Test enrollment
+→ Test recognition
+→ Verify database persistence
+→ Freeze verified dependencies
+```
+
+### Dockerization and Raspberry Pi Deployment Flow
+
+```text
+Start from locally verified application
+→ Create Dockerfile and Compose configuration
+→ Build ARM-compatible image
+→ Copy or pull image on Raspberry Pi
+→ Configure X11, Xauthority, audio device, volumes, and secrets
+→ Start Openbox/X11 on host
+→ Start container
+→ Verify full-screen Qt display
+→ Verify microphone access
+→ Run end-to-end enrollment and recognition
+→ Configure automatic startup after reboot
+```
 
 ### Enroll Speaker
 

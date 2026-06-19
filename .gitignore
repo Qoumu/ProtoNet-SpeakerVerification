@@ -35,6 +35,9 @@ dataset_absolute.txt
 
 # Generated model exports and evaluation output
 output/
+speaker_app/data/
+speaker_app/logs/
+speaker_app/runtime/
 enrolled_speakers.pt
 enrolled_speakers.npy
 enrolled_speakers_ids.txt
