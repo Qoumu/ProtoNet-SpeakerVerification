@@ -108,37 +108,118 @@ Speaker profiles default to `data/speakers.db`. Enrollment recordings are retain
 after a successful save unless `APP_RETAIN_ENROLLMENT_AUDIO=false`. Recognition
 recordings are always temporary.
 
-## Raspberry Pi 5 Deployment
+## Local Docker Build
 
-Required host assumptions: 64-bit Raspberry Pi OS, Docker Engine with Compose,
-X11/Openbox, a working USB microphone exposed as `/dev/snd`, and an existing
-Xauthority file. Verify these values on the actual Pi; they are host-specific.
+Build a native image for the current laptop:
 
 ```bash
 cd speaker_app
-cp config/raspberry-pi.env.example .env
-mkdir -p runtime/data runtime/logs runtime/secrets
-python -m speaker_app.password_hash > runtime/secrets/enrollment_password_hash
-chmod 600 runtime/secrets/enrollment_password_hash
+./scripts/docker-build-local.sh
 ```
 
-Edit `.env` with the Pi's `XAUTHORITY_FILE`, `AUDIO_GID`, microphone selector,
-UID/GID, model version, and calibrated threshold. The Compose file mounts the parent
-repository's `output/` directory read-only as `/app/models`; place the checkpoint
-there or change the model mount/path.
+This creates `protonet-speaker-app:local`. The build context is the repository root
+because the image includes `output/ecapa_tdnn_protonet_model.pth`. The local build
+uses PyTorch's CPU wheel index so it does not download the multi-gigabyte CUDA
+runtime. Override the tag with `LOCAL_IMAGE=my-image:test` when needed.
 
-Build and start after X11/Openbox is available:
+Basic container checks:
 
 ```bash
-docker compose --profile raspberry-pi build
-docker compose --profile raspberry-pi up -d
-docker compose logs -f speaker-app
+docker run --rm protonet-speaker-app:local \
+  python -m speaker_app.main --help
+
+docker run --rm protonet-speaker-app:local \
+  python -c "from speaker_app.config import load_config; from speaker_app.model import load_embedding_extractor; load_embedding_extractor(load_config('raspberry-pi')); print('model ready')"
 ```
 
-The container maps only `/dev/snd`, the X11 socket/Xauthority, persistent data and
-logs, the read-only model directory, and the password-hash secret. It does not use
-`privileged` mode. Real Raspberry Pi display, audio permissions, latency, restart,
-and end-to-end recognition still require hardware-in-the-loop verification.
+The complete GUI additionally needs the X11 socket/Xauthority and microphone mappings
+from `compose.yaml`. Use the development profile natively first; container GUI/audio
+behavior still depends on host X11 and `/dev/snd` permissions.
+
+### Run Locally on WSLg
+
+This repository's laptop environment uses WSLg, where X11 is exposed through
+`/tmp/.X11-unix` and microphone audio through `/mnt/wslg/PulseServer`. After building
+the local image, run:
+
+```bash
+cd speaker_app
+docker compose -f compose.local.yaml up
+```
+
+The window opens in WSLg and uses the `pulse` PortAudio device. Application data is
+mounted from `speaker_app/data`, logs from `speaker_app/logs`, and the model is loaded
+from the image. Stop it with `Ctrl+C`, or use detached mode:
+
+```bash
+docker compose -f compose.local.yaml up -d
+docker compose -f compose.local.yaml logs -f
+docker compose -f compose.local.yaml down
+```
+
+## Build and Push for Raspberry Pi 5
+
+The Raspberry Pi 5 normally runs a 64-bit `linux/arm64` image. Create a Docker Hub
+repository such as `YOUR_USER/protonet-speaker-app`, then authenticate on the build
+laptop. Use a Docker Hub access token instead of putting a password in this repo.
+
+```bash
+cd speaker_app
+docker login --username YOUR_DOCKERHUB_USER
+./scripts/docker-buildx-push.sh \
+  qumm296/sr-app rpi5
+```
+
+The script creates or reuses a Buildx container builder, cross-builds `linux/arm64`,
+pushes both `:rpi5` and `:latest`, and inspects the published manifest. To publish only
+the requested tag:
+
+```bash
+PUBLISH_LATEST=false ./scripts/docker-buildx-push.sh \
+  YOUR_DOCKERHUB_USER/protonet-speaker-app rpi5
+```
+
+The image contains the application, Python/native dependencies, trained model, and a
+default enrollment-password hash. The default enrollment password is `protonet`.
+Speaker profiles and enrollment recordings are not included because they contain
+user data; the launcher persists them on the Pi.
+
+## Raspberry Pi 5 Deployment
+
+Required host assumptions: 64-bit Raspberry Pi OS, Docker Engine, X11/Openbox, a
+working USB microphone exposed as `/dev/snd`, and an Xauthority file. Run this single
+command inside the Pi graphical session; no repository checkout is required:
+
+```bash
+docker run --pull=always --rm --entrypoint cat qumm296/sr-app:latest \
+  /opt/protonet/run-rpi-image.sh | \
+  bash -s -- qumm296/sr-app:latest
+```
+
+The first container prints its bundled host launcher, and host `bash` executes it.
+The launcher pulls the current image, supplies the X11 and `/dev/snd` mappings,
+recreates the application container, and prints startup logs. It persists the SQLite
+database, enrollment WAV files, and logs under
+`~/.local/share/protonet-speaker/`. A literal bare `docker run IMAGE` cannot provide
+host devices or bind mounts; Docker requires those settings at container creation.
+
+When the repository is present on the Pi, the equivalent shorter command is:
+
+```bash
+./speaker_app/scripts/run-rpi-image.sh qumm296/sr-app:latest
+```
+
+Manage the running application with:
+
+```bash
+docker logs -f protonet-speaker
+docker restart protonet-speaker
+docker stop protonet-speaker
+```
+
+Override the built-in password by exporting `ENROLLMENT_PASSWORD_HASH` before running
+the launcher. Real Raspberry Pi display, audio permissions, inference latency, and
+end-to-end recognition still require hardware-in-the-loop verification.
 
 ## Tests
 

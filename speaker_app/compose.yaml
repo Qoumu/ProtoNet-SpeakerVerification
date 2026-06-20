@@ -2,17 +2,18 @@ services:
   speaker-app:
     profiles: ["raspberry-pi"]
     build:
-      context: .
+      context: ..
+      dockerfile: speaker_app/Dockerfile
       args:
         APP_UID: ${APP_UID:-1000}
         APP_GID: ${APP_GID:-1000}
-    image: protonet-speaker-app:local
+    image: ${SPEAKER_APP_IMAGE:-protonet-speaker-app:local}
     user: "${APP_UID:-1000}:${APP_GID:-1000}"
     group_add:
       - "${AUDIO_GID:-29}"
     environment:
       APP_PROFILE: raspberry-pi
-      APP_WINDOWED: "false"
+      APP_WINDOWED: ${APP_WINDOWED:-false}
       APP_AUDIO_BACKEND: sounddevice
       APP_AUDIO_DEVICE: ${APP_AUDIO_DEVICE:-}
       APP_DATA_DIR: /app/data
@@ -22,8 +23,11 @@ services:
       APP_INFERENCE_PROVIDER: ${APP_INFERENCE_PROVIDER:-cpu}
       APP_LOG_DIR: /app/logs
       APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
-      APP_RECOGNITION_THRESHOLD: ${APP_RECOGNITION_THRESHOLD:-0.70}
-      ENROLLMENT_PASSWORD_HASH_FILE: /run/secrets/enrollment_password_hash
+      APP_RECOGNITION_THRESHOLD: ${APP_RECOGNITION_THRESHOLD:-0.50}
+      APP_AUDIO_GAIN_DB: ${APP_AUDIO_GAIN_DB:-20.0}
+      APP_AUDIO_DENOISE_ENABLED: ${APP_AUDIO_DENOISE_ENABLED:-true}
+      APP_RETAIN_ENROLLMENT_AUDIO: ${APP_RETAIN_ENROLLMENT_AUDIO:-true}
+      ENROLLMENT_PASSWORD_HASH: ${ENROLLMENT_PASSWORD_HASH:-}
       DISPLAY: ${DISPLAY:-:0}
       XAUTHORITY: /run/user/host.Xauthority
       QT_X11_NO_MITSHM: "1"
@@ -34,8 +38,6 @@ services:
       - ${XAUTHORITY_FILE}:/run/user/host.Xauthority:ro
       - ./runtime/data:/app/data
       - ./runtime/logs:/app/logs
-      - ../output:/app/models:ro
-      - ${HOST_ENROLLMENT_PASSWORD_HASH_FILE}:/run/secrets/enrollment_password_hash:ro
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

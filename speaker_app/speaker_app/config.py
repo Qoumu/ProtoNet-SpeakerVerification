@@ -110,10 +110,10 @@ def load_config(profile: str | None = None, *, windowed: bool | None = None) -> 
     return AppConfig(
         profile=selected_profile,
         windowed=configured_windowed,
-        enrollment_clip_count=int(os.getenv("APP_ENROLLMENT_CLIP_COUNT", "6")),
+        enrollment_clip_count=int(os.getenv("APP_ENROLLMENT_CLIP_COUNT", "5")),
         enrollment_clip_duration_seconds=float(os.getenv("APP_ENROLLMENT_CLIP_DURATION", "5")),
         recognition_clip_duration_seconds=float(os.getenv("APP_RECOGNITION_CLIP_DURATION", "5")),
-        recognition_threshold=float(os.getenv("APP_RECOGNITION_THRESHOLD", "0.70")),
+        recognition_threshold=float(os.getenv("APP_RECOGNITION_THRESHOLD", "0.55")),
         max_enrollment_password_attempts=int(os.getenv("APP_MAX_PASSWORD_ATTEMPTS", "3")),
         enrollment_authorization_timeout_seconds=int(os.getenv("APP_AUTH_TIMEOUT_SECONDS", "120")),
         sample_rate=int(os.getenv("APP_SAMPLE_RATE", "16000")),

@@ -1,0 +1,37 @@
+services:
+  speaker-app:
+    image: protonet-speaker-app:local
+    pull_policy: never
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    environment:
+      APP_PROFILE: development
+      APP_WINDOWED: "true"
+      APP_AUDIO_BACKEND: sounddevice
+      APP_AUDIO_DEVICE: ${APP_AUDIO_DEVICE:-pulse}
+      APP_AUDIO_GAIN_DB: ${APP_AUDIO_GAIN_DB:-20.0}
+      APP_AUDIO_DENOISE_ENABLED: ${APP_AUDIO_DENOISE_ENABLED:-true}
+      APP_RETAIN_ENROLLMENT_AUDIO: ${APP_RETAIN_ENROLLMENT_AUDIO:-true}
+      APP_DATA_DIR: /app/data
+      APP_MODEL_VERSION: ${APP_MODEL_VERSION:-ecapa-tdnn-protonet-v1}
+      APP_INFERENCE_PROVIDER: cpu
+      APP_LOG_DIR: /app/logs
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL:-DEBUG}
+      APP_RECOGNITION_THRESHOLD: ${APP_RECOGNITION_THRESHOLD:-0.50}
+      DISPLAY: ${DISPLAY:-:0}
+      PULSE_SERVER: unix:/mnt/wslg/PulseServer
+      QT_X11_NO_MITSHM: "1"
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /mnt/wslg/PulseServer:/mnt/wslg/PulseServer:rw
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command:
+      - python
+      - -m
+      - speaker_app.main
+      - --profile
+      - development
+      - --windowed
+      - --log-level
+      - DEBUG
+    restart: "no"

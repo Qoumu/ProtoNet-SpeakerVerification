@@ -18,4 +18,5 @@ data/
 
 output/*
 !output/ECAPATDNN_DataAug_protonet_model.pth
+!output/ecapa_tdnn_protonet_model.pth
 !output/enrolled_speakers.pt

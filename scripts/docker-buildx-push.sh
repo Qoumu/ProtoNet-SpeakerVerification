@@ -1,25 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -z "${DOCKERHUB_USER:-}" ]]; then
-  echo "DOCKERHUB_USER is required" >&2
-  exit 1
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+
+DOCKERHUB_IMAGE="${1:-${DOCKERHUB_IMAGE:-}}"
+IMAGE_TAG="${2:-${IMAGE_TAG:-rpi5}}"
+
+if [[ -z "${DOCKERHUB_IMAGE}" && -n "${DOCKERHUB_USER:-}" ]]; then
+  DOCKERHUB_IMAGE="${DOCKERHUB_USER}/${IMAGE_NAME:-protonet-sr-app}"
 fi
 
-IMAGE_NAME="${IMAGE_NAME:-protonet-sr}"
-IMAGE_TAG="${IMAGE_TAG:-latest}"
-PLATFORMS="${PLATFORMS:-linux/arm64}"
-EXTRA_TAG="${EXTRA_TAG:-rpi5}"
+if [[ -z "${DOCKERHUB_IMAGE}" ]]; then
+  echo "Usage: $0 DOCKERHUB_USER/IMAGE [TAG]" >&2
+  exit 2
+fi
 
-FULL_IMAGE="${DOCKERHUB_USER}/${IMAGE_NAME}"
-
-docker buildx inspect protonet-builder >/dev/null 2>&1 || docker buildx create --use --name protonet-builder
-
-docker buildx build \
-  --platform "${PLATFORMS}" \
-  -t "${FULL_IMAGE}:${IMAGE_TAG}" \
-  -t "${FULL_IMAGE}:${EXTRA_TAG}" \
-  --push \
-  .
-
-docker buildx imagetools inspect "${FULL_IMAGE}:${IMAGE_TAG}"
+PLATFORM="${PLATFORMS:-${PLATFORM:-linux/arm64}}" \
+  exec "${REPO_ROOT}/speaker_app/scripts/docker-buildx-push.sh" \
+  "${DOCKERHUB_IMAGE}" "${IMAGE_TAG}"
