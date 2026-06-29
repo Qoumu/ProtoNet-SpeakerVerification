@@ -7,6 +7,9 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = PACKAGE_ROOT.parent
+PASSWORD_HASH_FILE_NAME = "enrollment_password_hash"
+VALID_PROFILES = {"development", "raspberry-pi"}
+LEGACY_CONTAINER_ROOT = Path("/app")
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -21,21 +24,63 @@ def _bool_env(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be true or false")
 
 
-def _path_env(name: str, default: Path) -> Path:
-    return Path(os.getenv(name, str(default))).expanduser()
+def _is_legacy_container_path(path: Path) -> bool:
+    return path == LEGACY_CONTAINER_ROOT or LEGACY_CONTAINER_ROOT in path.parents
 
 
-def _password_hash() -> str | None:
+def _path_env(name: str, default: Path, *, ignore_legacy_container: bool = False) -> Path:
+    value = os.getenv(name)
+    if not value:
+        return default
+    path = Path(value).expanduser()
+    if ignore_legacy_container and _is_legacy_container_path(path):
+        return default
+    return path
+
+
+def _validate_profile(profile: str) -> str:
+    if profile not in VALID_PROFILES:
+        raise ValueError("profile must be 'development' or 'raspberry-pi'")
+    return profile
+
+
+def default_password_hash_path(
+    profile: str | None = None, *, honor_secret_file_env: bool = True
+) -> Path:
+    _validate_profile(profile or os.getenv("APP_PROFILE", "development"))
+    if honor_secret_file_env and os.getenv("ENROLLMENT_PASSWORD_HASH_FILE"):
+        return Path(os.environ["ENROLLMENT_PASSWORD_HASH_FILE"]).expanduser()
+    return (
+        _path_env(
+            "APP_DATA_DIR",
+            PACKAGE_ROOT / "data",
+            ignore_legacy_container=True,
+        )
+        / PASSWORD_HASH_FILE_NAME
+    )
+
+
+def _read_password_hash_file(path: Path, *, required: bool) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
+    except FileNotFoundError:
+        if required:
+            raise ValueError(f"Cannot read ENROLLMENT_PASSWORD_HASH_FILE: {path}") from None
+        return None
+    except OSError as exc:
+        raise ValueError(f"Cannot read enrollment password hash file: {path}") from exc
+
+
+def _password_hash(default_secret_path: Path) -> str | None:
     direct = os.getenv("ENROLLMENT_PASSWORD_HASH")
     if direct:
         return direct.strip()
     secret_path = os.getenv("ENROLLMENT_PASSWORD_HASH_FILE")
-    if not secret_path:
-        return None
-    try:
-        return Path(secret_path).read_text(encoding="utf-8").strip() or None
-    except OSError as exc:
-        raise ValueError(f"Cannot read ENROLLMENT_PASSWORD_HASH_FILE: {secret_path}") from exc
+    if secret_path:
+        configured_hash = _read_password_hash_file(Path(secret_path).expanduser(), required=False)
+        if configured_hash:
+            return configured_hash
+    return _read_password_hash_file(default_secret_path, required=False)
 
 
 @dataclass(frozen=True)
@@ -86,16 +131,16 @@ class AppConfig:
 
 
 def load_config(profile: str | None = None, *, windowed: bool | None = None) -> AppConfig:
-    selected_profile = profile or os.getenv("APP_PROFILE", "development")
-    if selected_profile not in {"development", "raspberry-pi"}:
-        raise ValueError("profile must be 'development' or 'raspberry-pi'")
+    selected_profile = _validate_profile(profile or os.getenv("APP_PROFILE", "development"))
 
     rpi = selected_profile == "raspberry-pi"
-    default_data = Path("/app/data") if rpi else PACKAGE_ROOT / "data"
-    default_models = Path("/app/models") if rpi else PROJECT_ROOT / "output"
-    default_logs = Path("/app/logs") if rpi else PACKAGE_ROOT / "logs"
-    data_dir = _path_env("APP_DATA_DIR", default_data)
-    model_dir = _path_env("APP_MODEL_DIR", default_models)
+    # Project-relative defaults keep both profiles writable for native launches.
+    # Deployments can still override any path with the matching APP_* variable.
+    default_data = PACKAGE_ROOT / "data"
+    default_models = PROJECT_ROOT / "output"
+    default_logs = PACKAGE_ROOT / "logs"
+    data_dir = _path_env("APP_DATA_DIR", default_data, ignore_legacy_container=True)
+    model_dir = _path_env("APP_MODEL_DIR", default_models, ignore_legacy_container=True)
     configured_windowed = _bool_env("APP_WINDOWED", not rpi) if windowed is None else windowed
 
     device_value = os.getenv("APP_AUDIO_DEVICE")
@@ -105,7 +150,9 @@ def load_config(profile: str | None = None, *, windowed: bool | None = None) -> 
 
     test_audio = os.getenv("APP_TEST_AUDIO_FILE")
     model_path = _path_env(
-        "APP_MODEL_PATH", model_dir / "ecapa_tdnn_protonet_model.pth"
+        "APP_MODEL_PATH",
+        model_dir / "ecapa_tdnn_protonet_model.pth",
+        ignore_legacy_container=True,
     )
     return AppConfig(
         profile=selected_profile,
@@ -122,16 +169,28 @@ def load_config(profile: str | None = None, *, windowed: bool | None = None) -> 
         audio_device=audio_device,
         audio_backend=os.getenv("APP_AUDIO_BACKEND", "sounddevice"),
         test_audio_file=Path(test_audio).expanduser() if test_audio else None,
-        database_path=_path_env("APP_DATABASE_PATH", data_dir / "speakers.db"),
-        temporary_audio_dir=_path_env("APP_TEMP_AUDIO_DIR", data_dir / "temporary_audio"),
-        enrollment_audio_dir=_path_env("APP_ENROLLMENT_AUDIO_DIR", data_dir / "enrollment_audio"),
+        database_path=_path_env(
+            "APP_DATABASE_PATH",
+            data_dir / "speakers.db",
+            ignore_legacy_container=True,
+        ),
+        temporary_audio_dir=_path_env(
+            "APP_TEMP_AUDIO_DIR",
+            data_dir / "temporary_audio",
+            ignore_legacy_container=True,
+        ),
+        enrollment_audio_dir=_path_env(
+            "APP_ENROLLMENT_AUDIO_DIR",
+            data_dir / "enrollment_audio",
+            ignore_legacy_container=True,
+        ),
         retain_enrollment_audio=_bool_env("APP_RETAIN_ENROLLMENT_AUDIO", True),
         model_path=model_path,
         model_version=os.getenv("APP_MODEL_VERSION", f"ecapa-tdnn:{model_path.name}"),
         inference_provider=os.getenv("APP_INFERENCE_PROVIDER", "cpu"),
-        log_dir=_path_env("APP_LOG_DIR", default_logs),
+        log_dir=_path_env("APP_LOG_DIR", default_logs, ignore_legacy_container=True),
         log_level=os.getenv("APP_LOG_LEVEL", "INFO" if rpi else "DEBUG"),
-        password_hash=_password_hash(),
+        password_hash=_password_hash(data_dir / PASSWORD_HASH_FILE_NAME),
         min_audio_duration_seconds=float(os.getenv("APP_MIN_AUDIO_DURATION", "2.0")),
         min_rms=float(os.getenv("APP_MIN_RMS", "0.008")),
         clipping_ratio_limit=float(os.getenv("APP_CLIPPING_RATIO_LIMIT", "0.02")),

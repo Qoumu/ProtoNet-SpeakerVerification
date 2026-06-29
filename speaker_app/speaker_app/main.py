@@ -150,7 +150,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     authorization_status = (
         authorization.configured,
-        "Configured" if authorization.configured else "ENROLLMENT_PASSWORD_HASH is missing",
+        "Configured"
+        if authorization.configured
+        else "Enrollment password is missing. Run python -m speaker_app.password_hash.",
     )
     LOGGER.log(
         logging.INFO if authorization.configured else logging.WARNING,

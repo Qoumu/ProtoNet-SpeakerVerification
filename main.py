@@ -26,11 +26,11 @@ XVECTOR_TDNN_CHANNELS = 512
 XVECTOR_STATS_CHANNELS = 1500
 XVECTOR_DROPOUT = 0.1
 
-TRAIN_MODE = False
-NUM_SPEAKERS = 40
-TRAIN_RATIO = 0.0
-VAL_RATIO = 0.0
-TEST_RATIO = 1.0
+TRAIN_MODE = True
+NUM_SPEAKERS = 250
+TRAIN_RATIO = 0.6
+VAL_RATIO = 0.2
+TEST_RATIO = 0.2
 MIN_SAMPLES_PER_SPEAKER = 20
 MAX_SAMPLES_PER_SPEAKER = None
 N_EPISODES = 500
@@ -56,7 +56,7 @@ def _default_dataset_root() -> Path:
     # if LOCAL_DATASET_ROOT.exists():
     #     return LOCAL_DATASET_ROOT
 
-    return DATASET_ROOT / "test-clean"
+    return DATASET_ROOT / "train-clean-100"
 
 
 def _detect_audio_ext(dataset_root: Path) -> str:

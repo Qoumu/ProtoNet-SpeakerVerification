@@ -5,11 +5,11 @@ Summary: Touchscreen speaker recognition application
 Requires-Python: >=3.10
 Requires-Dist: numpy<2,>=1.26
 Requires-Dist: noisereduce<4,>=3.0
-Requires-Dist: PySide6<7,>=6.7
+Requires-Dist: PySide6-Essentials==6.7.3
 Requires-Dist: sounddevice<1,>=0.5
 Requires-Dist: soundfile<1,>=0.13
-Requires-Dist: torch<3,>=2.4
-Requires-Dist: torchaudio<3,>=2.4
+Requires-Dist: torch==2.9.1
+Requires-Dist: torchaudio==2.9.1
 Provides-Extra: onnx
 Requires-Dist: onnxruntime<2,>=1.18; extra == "onnx"
 Provides-Extra: test
